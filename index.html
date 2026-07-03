@@ -482,8 +482,11 @@ function goToPage(page) {
     btn.classList.toggle('text-gray-500', !active)
     btn.classList.toggle('dark:text-gray-400', !active)
   })
-  if (page === 'dashboard' && !dashboardInitialized) initDashboardPage()
-  if (page === 'upload' && !uploadInitialized) initUploadPage()
+  // Lan dau vao trang thi dung skeleton HTML; nhung LAN NAO cung phai tai
+  // lai du lieu moi nhat (truoc day chi fetch 1 lan duy nhat, nen sau khi
+  // Upload xong quay lai Dashboard van thay trong vi du lieu cu da cache).
+  if (page === 'dashboard') { if (!dashboardInitialized) initDashboardPage(); else loadDashboardData() }
+  if (page === 'upload') { if (!uploadInitialized) initUploadPage(); else loadUploadHistory() }
 }
 document.querySelectorAll('.nav-btn').forEach((btn) => btn.addEventListener('click', () => goToPage(btn.dataset.page)))
 
@@ -528,6 +531,7 @@ function dashboardSkeletonHTML() {
       <select id="f_campaign" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800" style="max-width:220px"><option value="">Tất cả</option></select></div>
     <div><label class="mb-1 block text-xs font-medium text-gray-400">Sản phẩm</label>
       <select id="f_product" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800" style="max-width:220px"><option value="">Tất cả</option></select></div>
+    <button id="f_refreshBtn" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-white/5" title="Tải lại dữ liệu mới nhất từ Supabase">🔄 Làm mới</button>
   </div>
 
   <div id="dashLoading" class="text-sm text-gray-400">Đang tải dữ liệu Dashboard...</div>
@@ -593,6 +597,7 @@ function initDashboardPage() {
 
   ;['f_from', 'f_to'].forEach((id) => document.getElementById(id).addEventListener('change', loadDashboardData))
   ;['f_groupBy', 'f_shop', 'f_campaign', 'f_product'].forEach((id) => document.getElementById(id).addEventListener('change', renderDashboard))
+  document.getElementById('f_refreshBtn').addEventListener('click', loadDashboardData)
 
   loadDashboardData()
 }
