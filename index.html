@@ -326,23 +326,27 @@ async function syncRowsToSupabase(rows, { fileName, shopName, userId, onProgress
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
     const batch = rows.slice(i, i + BATCH_SIZE)
     const { error } = await sb.from(TABLE).upsert(batch, { onConflict: 'row_key', ignoreDuplicates: false })
-    if (error) failedBatches.push({ batchStart: i, message: error.message })
+    if (error) failedBatches.push({ batchStart: i, batchSize: batch.length, message: error.message })
     processed += batch.length
     onProgress?.(Math.round((processed / totalRows) * 100))
   }
 
   const { count: countAfter } = await sb.from(TABLE).select('id', { count: 'exact', head: true }).eq('shop_name', shopName)
   const insertedRows = Math.max(0, (countAfter ?? 0) - (countBefore ?? 0))
-  const errorRows = 0
+  // Moi batch loi thi TOAN BO dong trong batch do khong duoc ghi - tinh dung
+  // errorRows tu kich thuoc cac batch loi (truoc day bi hardcode = 0, khien
+  // batch loi bi tinh nham thanh "Cap nhat thanh cong" - da sua).
+  const errorRows = failedBatches.reduce((sum, b) => sum + b.batchSize, 0)
   const updatedRows = Math.max(0, totalRows - insertedRows - errorRows)
   const status = failedBatches.length === 0 ? 'success' : (insertedRows + updatedRows > 0 ? 'partial' : 'failed')
+  const errorMessage = failedBatches.length ? failedBatches[0].message : null
 
   await sb.from('upload_history').update({
     inserted_rows: insertedRows, updated_rows: updatedRows, error_rows: errorRows,
     status, error_detail: failedBatches.length ? { failedBatches } : null, finished_at: new Date().toISOString()
   }).eq('id', historyRow.id)
 
-  return { insertedRows, updatedRows, errorRows, status }
+  return { insertedRows, updatedRows, errorRows, status, errorMessage }
 }
 
 async function fetchUploadHistory(limit = 20) {
@@ -917,10 +921,14 @@ async function handleConfirmSync() {
       userId: currentSession?.user?.id,
       onProgress: (p) => { document.getElementById('up_syncing').innerHTML = progressBarHTML(p, 'Đang đồng bộ dữ liệu lên Supabase...') }
     })
+    const isOk = syncResult.status === 'success'
+    const boxColor = isOk ? 'bg-green-50 text-green-700' : (syncResult.insertedRows + syncResult.updatedRows > 0 ? 'bg-yellow-50 text-yellow-700' : 'bg-red-50 text-red-700')
+    const icon = isOk ? '✅' : '⚠️'
     document.getElementById('up_done').innerHTML = `
-      <div class="rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">
-        ✅ Hoàn tất! Thêm mới: <b>${syncResult.insertedRows}</b> dòng · Cập nhật: <b>${syncResult.updatedRows}</b> dòng
-        ${syncResult.errorRows > 0 ? ` · Lỗi: <b>${syncResult.errorRows}</b> dòng` : ''}
+      <div class="rounded-lg ${boxColor} px-4 py-3 text-sm">
+        ${icon} Thêm mới: <b>${syncResult.insertedRows}</b> dòng · Cập nhật: <b>${syncResult.updatedRows}</b> dòng
+        ${syncResult.errorRows > 0 ? ` · <b class="text-red-600">Lỗi/không ghi được: ${syncResult.errorRows} dòng</b>` : ''}
+        ${syncResult.errorMessage ? `<div class="mt-2 rounded bg-white/60 dark:bg-black/20 px-2 py-1.5 font-mono text-xs break-all">Chi tiết lỗi Supabase: ${escapeHtml(syncResult.errorMessage)}</div>` : ''}
       </div>
       <button id="up_afterDoneBtn" class="w-fit rounded-lg border px-4 py-2 text-sm border-gray-300 dark:border-gray-700">Upload file khác</button>`
     document.getElementById('up_afterDoneBtn').addEventListener('click', resetUpload)
