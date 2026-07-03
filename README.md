@@ -5,13 +5,14 @@ Web App quản lý & phân tích dữ liệu **Shopee Ads** — Upload Excel/CSV
 `index.html`** (không cần cài đặt, không cần build) + **1 file SQL** để tạo
 Database trên Supabase.
 
-## Bộ 3 file
+## Bộ file
 
-| File | Vai trò |
-|---|---|
-| `index.html` | Toàn bộ Web App (giao diện + logic). Chỉ cần sửa 2 dòng CONFIG rồi dùng. |
-| `supabase_schema.sql` | Chạy 1 lần trên Supabase để tạo Database (bảng, view, bảo mật RLS). |
-| `README.md` | File hướng dẫn này. |
+| File | Vai trò | Có cần đưa lên GitHub Pages không? |
+|---|---|---|
+| `index.html` | Toàn bộ Web App (giao diện + logic). Chỉ cần sửa 2 dòng CONFIG rồi dùng. | **Bắt buộc** — đây là file duy nhất GitHub Pages thực sự chạy. |
+| `.nojekyll` | File rỗng, báo GitHub bỏ qua bước build Jekyll (tránh lỗi deploy). | **Bắt buộc** — upload cùng `index.html`. |
+| `supabase_schema.sql` | Chạy 1 lần trên Supabase để tạo Database (bảng, view, bảo mật RLS). | Không bắt buộc, chỉ để lưu tham khảo/tái tạo Database sau này. |
+| `README.md` | File hướng dẫn này. | Không bắt buộc. |
 
 Kiến trúc: **Frontend tĩnh (HTML/JS)** gọi thẳng **Supabase** (Postgres +
 Auth) qua `supabase-js` — không có server trung gian, nên có thể host miễn
@@ -57,9 +58,13 @@ mới lấy tại Project Settings → API → Lưu file.
 
 1. Tạo repository mới trên https://github.com (vd: `shopee-ads-bi`). Có thể
    để **Public** vì không còn chứa key bí mật nào (chỉ có anon key công khai).
-2. Upload 3 file (`index.html`, `supabase_schema.sql`, `README.md`) lên repo:
+2. Upload file lên repo — **bắt buộc phải có `index.html` và `.nojekyll`**
+   (2 file còn lại `supabase_schema.sql`, `README.md` tuỳ chọn, để tham
+   khảo sau này):
    - Cách nhanh: vào repo trên GitHub → **Add file** → **Upload files** →
-     kéo thả 3 file → **Commit changes**.
+     kéo thả các file (nhớ chọn cả `.nojekyll`, đây là file ẩn nên phải
+     bật hiện file ẩn trong File Explorer/Finder trước khi kéo-thả) →
+     **Commit changes**.
    - Hoặc dùng Git:
      ```bash
      git init
@@ -75,6 +80,37 @@ mới lấy tại Project Settings → API → Lưu file.
 4. Chờ 1-2 phút, GitHub hiển thị link dạng:
    `https://<username>.github.io/shopee-ads-bi/`
    → Đây là link Web App để chia sẻ, dùng trên mọi thiết bị có trình duyệt.
+
+### Xử lý lỗi khi deploy GitHub Pages
+
+**Lỗi `Error: Deployment failed, try again later.`** hoặc mục **"All
+deployments"** hiện dấu ❌ đỏ ở `github-pages` — đây là lỗi hạ tầng/build
+của GitHub, **không liên quan đến file dữ liệu hay code trong app**. Xử lý
+theo thứ tự sau, làm hết cả 4 bước nếu bước trước chưa hết lỗi:
+
+1. **Thêm file `.nojekyll` vào repo (nguyên nhân phổ biến nhất)**: mặc định
+   GitHub Pages build site bằng Jekyll, đôi khi gây lỗi build không rõ ràng
+   với site HTML/JS thuần như bộ này. Bộ 4 file đã có sẵn file rỗng
+   `.nojekyll` — nhớ **upload cả file này lên repo cùng `index.html`** (ở
+   GitHub web UI, bật hiện file ẩn hoặc kéo-thả cả file `.nojekyll` vào
+   cùng lúc). File này báo cho GitHub bỏ qua bước build Jekyll, serve file
+   tĩnh trực tiếp.
+2. **Kiểm tra file nằm đúng ở gốc repo (root)**, không nằm trong thư mục
+   con. Vào tab **Code** của repo, phải thấy `index.html` ngay ngoài cùng,
+   không phải trong một folder con nào.
+3. **Kiểm tra Source đang chọn "Deploy from a branch"**: **Settings →
+   Pages → Build and deployment → Source** → chọn **Deploy from a branch**
+   → **Branch**: `main` / `root` → **Save**.
+4. **Nếu repo đang Private + tài khoản GitHub Free**: chuyển sang **Public**
+   tại **Settings → General → Danger Zone → Change repository visibility**
+   — GitHub Pages (kể cả 2 cách trên) đều không chạy được với repo Private
+   trên gói Free. An toàn vì 4 file trong bộ này không chứa secret nào.
+5. **Xem log lỗi chi tiết**: vào tab **Actions** hoặc bấm vào dòng deploy bị
+   lỗi trong **"All deployments"** → xem dòng báo lỗi cụ thể để biết chính
+   xác nguyên nhân nếu 4 bước trên chưa hết.
+
+Sau khi sửa, vào lại **Settings → Pages**, đợi 1-2 phút và refresh — hoặc
+tạo thêm 1 commit nhỏ bất kỳ (vd: sửa README) để kích hoạt build lại.
 
 ## BƯỚC 4 — Sử dụng
 
