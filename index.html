@@ -1,0 +1,971 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Shopee Ads BI Dashboard</title>
+
+<!-- ============================================================
+     THU VIEN NGOAI (CDN) - khong can build, mo truc tiep file nay
+     hoac host tinh tren GitHub Pages deu chay duoc.
+     ============================================================ -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.js"></script>
+
+<script>
+  // Cau hinh Tailwind: Dark Mode theo class + mau thuong hieu mac dinh.
+  // Doi cac ma mau "brand" o day khi co Logo cong ty chinh thuc.
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        colors: {
+          brand: {
+            DEFAULT: '#EE4D2D', 50: '#FEF2EF', 100: '#FDE1DA', 200: '#FAC0B2',
+            300: '#F69A85', 400: '#F2755A', 500: '#EE4D2D', 600: '#D53C1F',
+            700: '#AB2F19', 800: '#812313', 900: '#57170D'
+          }
+        }
+      }
+    }
+  }
+</script>
+
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  .card { border-radius: 0.75rem; border-width: 1px; }
+  ::-webkit-scrollbar { height: 8px; width: 8px; }
+  ::-webkit-scrollbar-thumb { background: #9CA3AF; border-radius: 4px; }
+  .hidden-important { display: none !important; }
+</style>
+</head>
+<body class="bg-gray-100 text-gray-900 dark:bg-gray-950 dark:text-gray-100 transition-colors">
+
+<!-- ============================================================
+     MAN HINH DANG NHAP
+     ============================================================ -->
+<div id="loginScreen" class="flex h-screen items-center justify-center">
+  <form id="loginForm" class="w-full max-w-sm rounded-2xl border border-gray-200 bg-white dark:bg-gray-900 dark:border-gray-700 p-8 shadow-sm">
+    <div class="mb-6 flex flex-col items-center">
+      <div class="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-brand text-xl font-bold text-white">S</div>
+      <h1 class="text-lg font-semibold">Shopee Ads BI</h1>
+      <p class="text-sm text-gray-400">Đăng nhập để tiếp tục</p>
+    </div>
+    <div id="loginError" class="mb-4 hidden-important rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600"></div>
+    <label class="mb-1 block text-sm font-medium">Email</label>
+    <input id="loginEmail" type="email" required class="mb-4 w-full rounded-lg border border-gray-300 dark:border-gray-700 dark:bg-gray-800 px-3 py-2 text-sm focus:border-brand focus:outline-none" placeholder="ban@congty.com" />
+    <label class="mb-1 block text-sm font-medium">Mật khẩu</label>
+    <input id="loginPassword" type="password" required class="mb-6 w-full rounded-lg border border-gray-300 dark:border-gray-700 dark:bg-gray-800 px-3 py-2 text-sm focus:border-brand focus:outline-none" placeholder="••••••••" />
+    <button type="submit" id="loginSubmitBtn" class="w-full rounded-lg bg-brand py-2.5 text-sm font-semibold text-white hover:bg-brand-600 disabled:opacity-60">Đăng nhập</button>
+    <p class="mt-4 text-center text-xs text-gray-400">Chưa có tài khoản? Tạo user tại Supabase Dashboard → Authentication → Users.</p>
+  </form>
+</div>
+
+<!-- ============================================================
+     KHUNG APP CHINH (Sidebar + Topbar + Noi dung)
+     ============================================================ -->
+<div id="appShell" class="hidden-important flex h-screen overflow-hidden">
+  <aside class="hidden md:flex w-64 flex-col border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-4 py-6">
+    <div class="mb-8 flex items-center gap-2 px-2">
+      <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-brand text-white font-bold">S</div>
+      <div>
+        <p class="text-sm font-bold leading-tight">Shopee Ads BI</p>
+        <p class="text-xs text-gray-400">Dashboard quản lý quảng cáo</p>
+      </div>
+    </div>
+    <nav class="flex flex-1 flex-col gap-1">
+      <button data-page="dashboard" class="nav-btn flex items-center gap-3 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-brand-50 dark:hover:bg-white/5">📊 Dashboard</button>
+      <button data-page="upload" class="nav-btn flex items-center gap-3 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-brand-50 dark:hover:bg-white/5">⬆️ Upload dữ liệu</button>
+    </nav>
+    <div class="mt-auto border-t border-gray-200 dark:border-gray-800 pt-4 text-xs text-gray-400">
+      Đăng nhập: <span id="userEmailLabel" class="font-medium text-gray-600 dark:text-gray-300"></span>
+    </div>
+  </aside>
+
+  <div class="flex flex-1 flex-col overflow-hidden">
+    <header class="flex items-center justify-between border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-6 py-4">
+      <h1 class="text-lg font-semibold">Shopee Ads BI Dashboard</h1>
+      <div class="flex items-center gap-3">
+        <button id="themeToggleBtn" class="rounded-lg border border-gray-300 dark:border-gray-700 px-3 py-1.5 text-sm">🌙 Dark</button>
+        <button id="logoutBtn" class="rounded-lg bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-600">Đăng xuất</button>
+      </div>
+    </header>
+    <main class="flex-1 overflow-y-auto p-6">
+      <div id="page-dashboard" class="page-section flex flex-col gap-6"></div>
+      <div id="page-upload" class="page-section hidden-important flex flex-col gap-6"></div>
+    </main>
+  </div>
+</div>
+
+
+<script>
+/* =============================================================================
+   SHOPEE ADS BI DASHBOARD - single-file vanilla JS app
+   Khong dung React/build step. Mo truc tiep index.html hoac host tinh tren
+   GitHub Pages deu chay duoc.
+   ============================================================================= */
+
+/* -----------------------------------------------------------------------
+   0. CAU HINH SUPABASE - BAT BUOC DIEN TRUOC KHI DUNG
+   Lay 2 gia tri nay tai Supabase Dashboard > Project Settings > API.
+   anon public key la key CONG KHAI, an toan khi de trong file tinh vi du
+   lieu da duoc bao ve bang Row Level Security (RLS) - xem supabase_schema.sql
+   ----------------------------------------------------------------------- */
+const SUPABASE_URL = 'https://fphiqjdwnbegdhtkuhvb.supabase.co'
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZwaGlxamR3bmJlZ2RodGt1aHZiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwNjE4MjYsImV4cCI6MjA5ODYzNzgyNn0.3uNmTB33yNgslbjkeIw2LFgmUwtwcfR7ciSHqCPreI0'
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+/* -----------------------------------------------------------------------
+   1. TIEN ICH NGAY THANG (thay the date-fns, khong can them thu vien)
+   ----------------------------------------------------------------------- */
+const pad2 = (n) => String(n).padStart(2, '0')
+const toISODate = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+const startOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1)
+const addMonths = (d, delta) => new Date(d.getFullYear(), d.getMonth() + delta, d.getDate())
+const startOfWeekMonday = (d) => {
+  const day = d.getDay()
+  const diff = day === 0 ? -6 : 1 - day
+  const res = new Date(d)
+  res.setDate(d.getDate() + diff)
+  return res
+}
+const quarterOf = (month) => Math.ceil(month / 3)
+
+function periodKey(row, groupBy) {
+  const d = row.ngay_bat_dau ? new Date(row.ngay_bat_dau) : null
+  switch (groupBy) {
+    case 'day':
+      return d && !isNaN(d) ? toISODate(d) : 'N/A'
+    case 'week':
+      return d && !isNaN(d) ? toISODate(startOfWeekMonday(d)) : 'N/A'
+    case 'quarter':
+      return `${row.nam}-Q${quarterOf(row.thang)}`
+    case 'year':
+      return `${row.nam}`
+    case 'month':
+    default:
+      return `${row.nam}-${pad2(row.thang)}`
+  }
+}
+
+function periodDisplay(key, groupBy) {
+  if (key === 'N/A') return 'N/A'
+  switch (groupBy) {
+    case 'day': { const [y, m, d] = key.split('-'); return `${d}/${m}/${y}` }
+    case 'week': { const [y, m, d] = key.split('-'); return `Tuần ${d}/${m}/${y}` }
+    case 'quarter': return key.replace('-', ' ')
+    case 'year': return key
+    case 'month':
+    default: { const [y, m] = key.split('-'); return `${m}/${y}` }
+  }
+}
+
+/* -----------------------------------------------------------------------
+   2. DINH NGHIA CAU TRUC FILE SHOPEE ADS (dung theo "Data base.xlsx")
+   Neu Shopee doi dinh dang, chi can sua mang COLUMNS nay.
+   ----------------------------------------------------------------------- */
+const COLUMNS = [
+  { header: 'Tháng', key: 'thang', type: 'int' },
+  { header: 'Năm', key: 'nam', type: 'int' },
+  { header: 'Thứ tự', key: 'thu_tu', type: 'int' },
+  { header: 'Tên Dịch vụ Hiển thị', key: 'ten_dich_vu_hien_thi', type: 'text' },
+  { header: 'Trạng thái', key: 'trang_thai', type: 'text' },
+  { header: 'Loại Dịch vụ Hiển thị', key: 'loai_dich_vu_hien_thi', type: 'text' },
+  { header: 'Mã sản phẩm', key: 'ma_san_pham', type: 'text' },
+  { header: 'Nội dung Dịch vụ Hiển thị', key: 'noi_dung_dich_vu_hien_thi', type: 'text' },
+  { header: 'Phương thức đấu thầu', key: 'phuong_thuc_dau_thau', type: 'text' },
+  { header: 'Vị trí', key: 'vi_tri', type: 'text' },
+  { header: 'Từ khóa / Vị trí', key: 'tu_khoa_vi_tri', type: 'text' },
+  { header: 'Loại từ khóa', key: 'loai_tu_khoa', type: 'text' },
+  { header: 'Ngày bắt đầu', key: 'ngay_bat_dau', type: 'date' },
+  { header: 'Ngày kết thúc', key: 'ngay_ket_thuc', type: 'text' },
+  { header: '(Cột Shopee ẩn)', key: 'cot_an', type: 'float' },
+  { header: 'Số lượt xem', key: 'so_luot_xem', type: 'int' },
+  { header: 'Số lượt click', key: 'so_luot_click', type: 'int' },
+  { header: 'Tỷ Lệ Click', key: 'ty_le_click', type: 'float' },
+  { header: 'Lượt chuyển đổi', key: 'luot_chuyen_doi', type: 'int' },
+  { header: 'Lượt chuyển đổi trực tiếp', key: 'luot_chuyen_doi_truc_tiep', type: 'int' },
+  { header: 'Tỷ lệ chuyển đổi', key: 'ty_le_chuyen_doi', type: 'float' },
+  { header: 'Tỷ lệ chuyển đổi trực tiếp', key: 'ty_le_chuyen_doi_truc_tiep', type: 'float' },
+  { header: 'Chi phí cho mỗi lượt chuyển đổi', key: 'cpa', type: 'float' },
+  { header: 'Chi phí cho mỗi lượt chuyển đổi trực tiếp', key: 'cpa_truc_tiep', type: 'float' },
+  { header: 'Sản phẩm đã bán', key: 'san_pham_da_ban', type: 'int' },
+  { header: 'Sản phẩm đã bán trực tiếp', key: 'san_pham_da_ban_truc_tiep', type: 'int' },
+  { header: 'Doanh số', key: 'doanh_so', type: 'float' },
+  { header: 'Doanh số trực tiếp', key: 'doanh_so_truc_tiep', type: 'float' },
+  { header: 'Chi phí', key: 'chi_phi', type: 'float' },
+  { header: 'ROAS', key: 'roas', type: 'float' },
+  { header: 'ROAS trực tiếp', key: 'roas_truc_tiep', type: 'float' },
+  { header: 'ACOS', key: 'acos', type: 'float' },
+  { header: 'ACOS trực tiếp', key: 'acos_truc_tiep', type: 'float' },
+  { header: 'Lượt xem Sản phẩm', key: 'luot_xem_san_pham', type: 'int' },
+  { header: 'Lượt clicks Sản phẩm', key: 'luot_click_san_pham', type: 'int' },
+  { header: 'Tỷ lệ Click Sản phẩm', key: 'ty_le_click_san_pham', type: 'float' }
+]
+const REQUIRED_KEYS = ['thang', 'nam', 'ten_dich_vu_hien_thi']
+
+function toIntOrZero(v) {
+  if (v === null || v === undefined || v === '' || v === '-') return 0
+  const n = Number(String(v).replace(/,/g, '').trim())
+  return Number.isFinite(n) ? Math.trunc(n) : 0
+}
+function toFloatOrZero(v) {
+  if (v === null || v === undefined || v === '' || v === '-') return 0
+  const n = Number(String(v).replace(/,/g, '').trim())
+  return Number.isFinite(n) ? n : 0
+}
+function toDateOrNull(v) {
+  if (!v || v === '-') return null
+  if (v instanceof Date) return toISODate(v)
+  const d = new Date(v)
+  return isNaN(d) ? null : toISODate(d)
+}
+function toTextOrNull(v) {
+  if (v === null || v === undefined || v === '') return null
+  return String(v).trim()
+}
+const CASTERS = { int: toIntOrZero, float: toFloatOrZero, date: toDateOrNull, text: toTextOrNull }
+
+async function readRawRows(file) {
+  const isCsv = file.name.toLowerCase().endsWith('.csv')
+  if (isCsv) {
+    const text = await file.text()
+    return Papa.parse(text, { skipEmptyLines: true }).data
+  }
+  const buffer = await file.arrayBuffer()
+  const wb = XLSX.read(buffer, { type: 'array', cellDates: true })
+  const sheet = wb.Sheets[wb.SheetNames[0]]
+  return XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null })
+}
+
+function findHeaderRowIndex(rows) {
+  const first = COLUMNS[0].header, second = COLUMNS[1].header
+  for (let i = 0; i < Math.min(rows.length, 20); i++) {
+    const row = rows[i] || []
+    if (String(row[0] ?? '').trim() === first && String(row[1] ?? '').trim() === second) return i
+  }
+  return -1
+}
+
+/** Doc + validate + chuan hoa file thanh danh sach row san sang ghi Supabase */
+async function parseShopeeAdsFile(file, shopName) {
+  const rawRows = await readRawRows(file)
+  const headerIdx = findHeaderRowIndex(rawRows)
+
+  if (headerIdx === -1) {
+    return {
+      headerValid: false,
+      missingColumns: COLUMNS.map((c) => c.header),
+      rows: [],
+      errors: [{ row: 0, message: 'Không tìm thấy dòng tiêu đề đúng định dạng Shopee (Tháng, Năm, ...).' }],
+      totalDataRows: 0
+    }
+  }
+
+  const headerRow = (rawRows[headerIdx] || []).map((h) => String(h ?? '').trim())
+  const missingColumns = COLUMNS.filter((c) => !headerRow.includes(c.header)).map((c) => c.header)
+  const headerValid = missingColumns.length === 0
+
+  const colIndexByKey = {}
+  COLUMNS.forEach((c) => { colIndexByKey[c.key] = headerRow.indexOf(c.header) })
+
+  const dataRows = rawRows.slice(headerIdx + 1).filter((r) => r && r.some((cell) => cell !== null && cell !== undefined && cell !== ''))
+
+  const rows = [], errors = []
+  dataRows.forEach((raw, i) => {
+    const rowNum = headerIdx + 2 + i
+    const obj = { shop_name: shopName, source_file_name: file.name }
+    let hasError = false
+    COLUMNS.forEach((col) => {
+      const idx = colIndexByKey[col.key]
+      obj[col.key] = CASTERS[col.type](idx >= 0 ? raw[idx] : null)
+    })
+    REQUIRED_KEYS.forEach((key) => {
+      if (obj[key] === null || obj[key] === undefined || obj[key] === '') {
+        hasError = true
+        errors.push({ row: rowNum, message: `Thiếu giá trị bắt buộc cho cột "${key}".` })
+      }
+    })
+    if (!hasError) rows.push(obj)
+  })
+
+  return { headerValid, missingColumns, rows, errors, totalDataRows: dataRows.length }
+}
+
+/* -----------------------------------------------------------------------
+   3. DONG BO LEN SUPABASE (Insert moi / Update da ton tai, khong trung)
+   ----------------------------------------------------------------------- */
+const TABLE = 'ads_campaign_reports'
+const BATCH_SIZE = 300
+
+async function syncRowsToSupabase(rows, { fileName, shopName, userId, onProgress }) {
+  const totalRows = rows.length
+
+  const { data: historyRow, error: historyError } = await sb
+    .from('upload_history')
+    .insert({ file_name: fileName, shop_name: shopName, uploaded_by: userId, total_rows: totalRows, status: 'processing' })
+    .select().single()
+  if (historyError) throw historyError
+
+  const { count: countBefore } = await sb.from(TABLE).select('id', { count: 'exact', head: true }).eq('shop_name', shopName)
+
+  let processed = 0
+  const failedBatches = []
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE)
+    const { error } = await sb.from(TABLE).upsert(batch, { onConflict: 'row_key', ignoreDuplicates: false })
+    if (error) failedBatches.push({ batchStart: i, message: error.message })
+    processed += batch.length
+    onProgress?.(Math.round((processed / totalRows) * 100))
+  }
+
+  const { count: countAfter } = await sb.from(TABLE).select('id', { count: 'exact', head: true }).eq('shop_name', shopName)
+  const insertedRows = Math.max(0, (countAfter ?? 0) - (countBefore ?? 0))
+  const errorRows = 0
+  const updatedRows = Math.max(0, totalRows - insertedRows - errorRows)
+  const status = failedBatches.length === 0 ? 'success' : (insertedRows + updatedRows > 0 ? 'partial' : 'failed')
+
+  await sb.from('upload_history').update({
+    inserted_rows: insertedRows, updated_rows: updatedRows, error_rows: errorRows,
+    status, error_detail: failedBatches.length ? { failedBatches } : null, finished_at: new Date().toISOString()
+  }).eq('id', historyRow.id)
+
+  return { insertedRows, updatedRows, errorRows, status }
+}
+
+async function fetchUploadHistory(limit = 20) {
+  const { data, error } = await sb.from('upload_history').select('*').order('created_at', { ascending: false }).limit(limit)
+  if (error) throw error
+  return data
+}
+
+/* -----------------------------------------------------------------------
+   4. TINH TOAN KPI / NHOM DU LIEU
+   Ty le (CTR, CVR, ROAS, ACOS, CPC, CPM, CPA) tinh lai tu TONG tuyet doi,
+   khong lay trung binh cong tung dong.
+   ----------------------------------------------------------------------- */
+const sumBy = (rows, key) => rows.reduce((s, r) => s + (Number(r[key]) || 0), 0)
+
+function computeKpis(rows) {
+  const impressions = sumBy(rows, 'so_luot_xem')
+  const clicks = sumBy(rows, 'so_luot_click')
+  const conversions = sumBy(rows, 'luot_chuyen_doi')
+  const orders = sumBy(rows, 'san_pham_da_ban')
+  const revenue = sumBy(rows, 'doanh_so')
+  const cost = sumBy(rows, 'chi_phi')
+  const addToCart = sumBy(rows, 'add_to_cart')
+
+  return {
+    impressions, clicks, conversions, orders, revenue, cost, addToCart,
+    ctr: impressions > 0 ? (clicks / impressions) * 100 : 0,
+    cvr: clicks > 0 ? (conversions / clicks) * 100 : 0,
+    cpc: clicks > 0 ? cost / clicks : 0,
+    cpm: impressions > 0 ? (cost / impressions) * 1000 : 0,
+    cpa: conversions > 0 ? cost / conversions : 0,
+    roas: cost > 0 ? revenue / cost : 0,
+    acos: revenue > 0 ? (cost / revenue) * 100 : 0
+  }
+}
+
+function groupAndCompute(rows, keyFn) {
+  const map = new Map()
+  rows.forEach((r) => {
+    const key = keyFn(r)
+    if (!map.has(key)) map.set(key, [])
+    map.get(key).push(r)
+  })
+  return Array.from(map.entries())
+    .map(([label, groupRows]) => ({ label, ...computeKpis(groupRows), count: groupRows.length }))
+    .sort((a, b) => (a.label > b.label ? 1 : -1))
+}
+
+function topN(rows, keyFn, n, sortKey) {
+  return groupAndCompute(rows, keyFn).sort((a, b) => b[sortKey] - a[sortKey]).slice(0, n)
+}
+
+const formatVND = (v) => new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND', maximumFractionDigits: 0 }).format(v || 0)
+const formatNumber = (v) => new Intl.NumberFormat('vi-VN').format(Math.round(v || 0))
+const formatPercent = (v) => `${(v || 0).toFixed(2)}%`
+
+/* -----------------------------------------------------------------------
+   5. AUTH (Supabase Auth email/password)
+   ----------------------------------------------------------------------- */
+let currentSession = null
+
+async function initAuth() {
+  const { data } = await sb.auth.getSession()
+  currentSession = data.session
+  sb.auth.onAuthStateChange((_event, session) => {
+    currentSession = session
+    renderAuthState()
+  })
+  renderAuthState()
+}
+
+function renderAuthState() {
+  const loginScreen = document.getElementById('loginScreen')
+  const appShell = document.getElementById('appShell')
+  if (currentSession) {
+    loginScreen.classList.add('hidden-important')
+    appShell.classList.remove('hidden-important')
+    document.getElementById('userEmailLabel').textContent = currentSession.user.email
+    goToPage('dashboard')
+  } else {
+    appShell.classList.add('hidden-important')
+    loginScreen.classList.remove('hidden-important')
+  }
+}
+
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const email = document.getElementById('loginEmail').value
+  const password = document.getElementById('loginPassword').value
+  const errorBox = document.getElementById('loginError')
+  const btn = document.getElementById('loginSubmitBtn')
+  errorBox.classList.add('hidden-important')
+  btn.disabled = true
+  btn.textContent = 'Đang đăng nhập...'
+  const { error } = await sb.auth.signInWithPassword({ email, password })
+  btn.disabled = false
+  btn.textContent = 'Đăng nhập'
+  if (error) {
+    errorBox.textContent = 'Sai email hoặc mật khẩu.'
+    errorBox.classList.remove('hidden-important')
+  }
+})
+
+document.getElementById('logoutBtn').addEventListener('click', () => sb.auth.signOut())
+
+/* -----------------------------------------------------------------------
+   6. DARK MODE
+   ----------------------------------------------------------------------- */
+function initTheme() {
+  const saved = localStorage.getItem('sab-theme') || 'light'
+  applyTheme(saved)
+  document.getElementById('themeToggleBtn').addEventListener('click', () => {
+    const isDark = document.documentElement.classList.contains('dark')
+    applyTheme(isDark ? 'light' : 'dark')
+  })
+}
+function applyTheme(theme) {
+  document.documentElement.classList.toggle('dark', theme === 'dark')
+  document.getElementById('themeToggleBtn').textContent = theme === 'dark' ? '☀️ Light' : '🌙 Dark'
+  localStorage.setItem('sab-theme', theme)
+}
+
+/* -----------------------------------------------------------------------
+   7. ROUTER (2 trang: dashboard / upload) - hien/an, khong dung thu vien
+   ----------------------------------------------------------------------- */
+function goToPage(page) {
+  document.querySelectorAll('.page-section').forEach((el) => el.classList.add('hidden-important'))
+  document.getElementById(`page-${page}`).classList.remove('hidden-important')
+  document.querySelectorAll('.nav-btn').forEach((btn) => {
+    const active = btn.dataset.page === page
+    btn.classList.toggle('bg-brand', active)
+    btn.classList.toggle('text-white', active)
+    btn.classList.toggle('text-gray-500', !active)
+    btn.classList.toggle('dark:text-gray-400', !active)
+  })
+  if (page === 'dashboard' && !dashboardInitialized) initDashboardPage()
+  if (page === 'upload' && !uploadInitialized) initUploadPage()
+}
+document.querySelectorAll('.nav-btn').forEach((btn) => btn.addEventListener('click', () => goToPage(btn.dataset.page)))
+
+/* -----------------------------------------------------------------------
+   8. TRANG DASHBOARD
+   ----------------------------------------------------------------------- */
+let dashboardInitialized = false
+let dashRawRows = []
+let dashCharts = {}
+const KPI_DEFS = [
+  { key: 'revenue', label: 'Doanh thu', fmt: formatVND, color: 'text-brand' },
+  { key: 'cost', label: 'Chi phí Ads', fmt: formatVND, color: 'text-red-500' },
+  { key: 'roas', label: 'ROAS', fmt: (v) => v.toFixed(2) + 'x', color: 'text-green-600' },
+  { key: 'acos', label: 'ACOS', fmt: formatPercent, color: 'text-orange-500' },
+  { key: 'ctr', label: 'CTR', fmt: formatPercent },
+  { key: 'cpc', label: 'CPC', fmt: formatVND },
+  { key: 'cpm', label: 'CPM', fmt: formatVND },
+  { key: 'cpa', label: 'CPA', fmt: formatVND },
+  { key: 'cvr', label: 'CVR / Conversion Rate', fmt: formatPercent },
+  { key: 'clicks', label: 'Click', fmt: formatNumber },
+  { key: 'impressions', label: 'Impression', fmt: formatNumber },
+  { key: 'addToCart', label: 'Add To Cart', fmt: (v) => (v > 0 ? formatNumber(v) : '—'), note: (v) => (v > 0 ? null : 'Chưa có trong nguồn dữ liệu hiện tại') },
+  { key: 'orders', label: 'Orders', fmt: formatNumber }
+]
+
+function dashboardSkeletonHTML() {
+  return `
+  <div class="card flex flex-wrap items-end gap-3 p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <div><label class="mb-1 block text-xs font-medium text-gray-400">Từ ngày</label>
+      <input type="date" id="f_from" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800"></div>
+    <div><label class="mb-1 block text-xs font-medium text-gray-400">Đến ngày</label>
+      <input type="date" id="f_to" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800"></div>
+    <div><label class="mb-1 block text-xs font-medium text-gray-400">Nhóm theo</label>
+      <select id="f_groupBy" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800">
+        <option value="day">Theo ngày</option><option value="week">Theo tuần</option>
+        <option value="month" selected>Theo tháng</option><option value="quarter">Theo quý</option>
+        <option value="year">Theo năm</option>
+      </select></div>
+    <div><label class="mb-1 block text-xs font-medium text-gray-400">Shop</label>
+      <select id="f_shop" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800"><option value="">Tất cả</option></select></div>
+    <div><label class="mb-1 block text-xs font-medium text-gray-400">Campaign</label>
+      <select id="f_campaign" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800" style="max-width:220px"><option value="">Tất cả</option></select></div>
+    <div><label class="mb-1 block text-xs font-medium text-gray-400">Sản phẩm</label>
+      <select id="f_product" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800" style="max-width:220px"><option value="">Tất cả</option></select></div>
+  </div>
+
+  <div id="dashLoading" class="text-sm text-gray-400">Đang tải dữ liệu Dashboard...</div>
+  <div id="dashError" class="hidden-important rounded-lg bg-red-50 px-4 py-3 text-sm text-red-600"></div>
+
+  <div id="dashContent" class="hidden-important flex flex-col gap-6">
+    <div id="kpiGrid" class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6"></div>
+
+    <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+      <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+        <h3 class="text-sm font-semibold mb-1">Xu hướng Doanh thu & Chi phí</h3>
+        <p class="text-xs text-gray-400 mb-3">Line Chart</p>
+        <canvas id="chartRevenueCost" height="140"></canvas>
+      </div>
+      <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+        <h3 class="text-sm font-semibold mb-1">Xu hướng ROAS & ACOS</h3>
+        <p class="text-xs text-gray-400 mb-3">Trend Chart</p>
+        <canvas id="chartRoasAcos" height="140"></canvas>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+      <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+        <h3 class="text-sm font-semibold mb-1">Chi phí theo Campaign (Top 10)</h3>
+        <p class="text-xs text-gray-400 mb-3">Bar Chart</p>
+        <canvas id="chartCampaignBar" height="180"></canvas>
+      </div>
+      <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+        <h3 class="text-sm font-semibold mb-1">Chi phí theo Trạng thái</h3>
+        <p class="text-xs text-gray-400 mb-3">Pie Chart</p>
+        <canvas id="chartStatusPie" height="180"></canvas>
+      </div>
+    </div>
+
+    <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <h3 class="text-sm font-semibold mb-1">Heatmap Chi phí theo Campaign x Tháng</h3>
+      <p class="text-xs text-gray-400 mb-3">Đậm màu = chi phí cao</p>
+      <div id="heatmapContainer" class="overflow-x-auto"></div>
+    </div>
+
+    <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+      <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+        <h3 class="text-sm font-semibold mb-3">Top Campaign (theo Chi phí)</h3>
+        <div id="topCampaignTable" class="overflow-x-auto"></div>
+      </div>
+      <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+        <h3 class="text-sm font-semibold mb-3">Top Sản phẩm (theo Doanh thu)</h3>
+        <div id="topProductTable" class="overflow-x-auto"></div>
+      </div>
+    </div>
+  </div>`
+}
+
+function initDashboardPage() {
+  dashboardInitialized = true
+  const container = document.getElementById('page-dashboard')
+  container.innerHTML = dashboardSkeletonHTML()
+
+  const to = new Date()
+  const from = addMonths(startOfMonth(to), -5)
+  document.getElementById('f_from').value = toISODate(from)
+  document.getElementById('f_to').value = toISODate(to)
+
+  ;['f_from', 'f_to'].forEach((id) => document.getElementById(id).addEventListener('change', loadDashboardData))
+  ;['f_groupBy', 'f_shop', 'f_campaign', 'f_product'].forEach((id) => document.getElementById(id).addEventListener('change', renderDashboard))
+
+  loadDashboardData()
+}
+
+async function loadDashboardData() {
+  const loadingEl = document.getElementById('dashLoading')
+  const errorEl = document.getElementById('dashError')
+  const contentEl = document.getElementById('dashContent')
+  loadingEl.classList.remove('hidden-important')
+  errorEl.classList.add('hidden-important')
+  contentEl.classList.add('hidden-important')
+
+  const from = document.getElementById('f_from').value
+  const to = document.getElementById('f_to').value
+  const monthStart = toISODate(startOfMonth(new Date(from)))
+  const monthEnd = toISODate(startOfMonth(new Date(to)))
+
+  const { data, error } = await sb.from('v_ads_computed').select('*').gte('period_date', monthStart).lte('period_date', monthEnd).limit(20000)
+
+  loadingEl.classList.add('hidden-important')
+  if (error) {
+    errorEl.textContent = 'Lỗi tải dữ liệu: ' + error.message
+    errorEl.classList.remove('hidden-important')
+    return
+  }
+  dashRawRows = data || []
+  populateFilterOptions()
+  contentEl.classList.remove('hidden-important')
+  renderDashboard()
+}
+
+function populateFilterOptions() {
+  const shops = [...new Set(dashRawRows.map((r) => r.shop_name).filter(Boolean))].sort()
+  const campaigns = [...new Set(dashRawRows.map((r) => r.ten_dich_vu_hien_thi).filter(Boolean))].sort()
+  const products = [...new Set(dashRawRows.map((r) => r.ma_san_pham).filter(Boolean))].sort()
+  fillSelect('f_shop', shops)
+  fillSelect('f_campaign', campaigns)
+  fillSelect('f_product', products)
+}
+function fillSelect(id, values) {
+  const el = document.getElementById(id)
+  const current = el.value
+  el.innerHTML = '<option value="">Tất cả</option>' + values.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')
+  if (values.includes(current)) el.value = current
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+function getFilteredRows() {
+  const from = document.getElementById('f_from').value
+  const to = document.getElementById('f_to').value
+  const shop = document.getElementById('f_shop').value
+  const campaign = document.getElementById('f_campaign').value
+  const product = document.getElementById('f_product').value
+
+  return dashRawRows.filter((r) => {
+    if (shop && r.shop_name !== shop) return false
+    if (campaign && r.ten_dich_vu_hien_thi !== campaign) return false
+    if (product && r.ma_san_pham !== product) return false
+    if (r.ngay_bat_dau && (r.ngay_bat_dau < from || r.ngay_bat_dau > to)) return false
+    return true
+  })
+}
+
+function renderDashboard() {
+  const groupBy = document.getElementById('f_groupBy').value
+  const rows = getFilteredRows()
+
+  renderKpiCards(computeKpis(rows))
+
+  const trendData = groupAndCompute(rows, (r) => periodKey(r, groupBy))
+  renderTrendCharts(trendData, groupBy)
+
+  const topCampaigns = topN(rows, (r) => r.ten_dich_vu_hien_thi || 'Không rõ', 10, 'cost')
+  const topProducts = topN(rows, (r) => r.ma_san_pham || 'Không rõ', 10, 'revenue')
+  const statusData = groupAndCompute(rows, (r) => r.trang_thai || 'Không rõ')
+
+  renderCampaignBar(topCampaigns)
+  renderStatusPie(statusData)
+  renderHeatmap(rows, topCampaigns)
+  renderTopTable('topCampaignTable', topCampaigns, 'Campaign')
+  renderTopTable('topProductTable', topProducts, 'Mã sản phẩm')
+}
+
+function renderKpiCards(kpis) {
+  document.getElementById('kpiGrid').innerHTML = KPI_DEFS.map((d) => {
+    const value = d.fmt(kpis[d.key])
+    const note = d.note ? d.note(kpis[d.key]) : null
+    return `<div class="card p-3 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <p class="text-xs text-gray-400">${d.label}</p>
+      <p class="mt-1 text-lg font-bold ${d.color || ''}">${value}</p>
+      ${note ? `<p class="mt-0.5 text-[10px] text-gray-400">${note}</p>` : ''}
+    </div>`
+  }).join('')
+}
+
+function destroyChart(name) { if (dashCharts[name]) { dashCharts[name].destroy(); delete dashCharts[name] } }
+
+function renderTrendCharts(trendData, groupBy) {
+  const labels = trendData.map((d) => periodDisplay(d.label, groupBy))
+
+  destroyChart('revenueCost')
+  dashCharts.revenueCost = new Chart(document.getElementById('chartRevenueCost'), {
+    type: 'line',
+    data: { labels, datasets: [
+      { label: 'Doanh thu', data: trendData.map((d) => d.revenue), borderColor: '#EE4D2D', backgroundColor: '#EE4D2D', tension: 0.3 },
+      { label: 'Chi phí', data: trendData.map((d) => d.cost), borderColor: '#3B82F6', backgroundColor: '#3B82F6', tension: 0.3 }
+    ] },
+    options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+  })
+
+  destroyChart('roasAcos')
+  dashCharts.roasAcos = new Chart(document.getElementById('chartRoasAcos'), {
+    type: 'line',
+    data: { labels, datasets: [
+      { label: 'ROAS (x)', data: trendData.map((d) => d.roas), borderColor: '#10B981', backgroundColor: '#10B981', tension: 0.3 },
+      { label: 'ACOS (%)', data: trendData.map((d) => d.acos), borderColor: '#F59E0B', backgroundColor: '#F59E0B', tension: 0.3 }
+    ] },
+    options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+  })
+}
+
+function renderCampaignBar(topCampaigns) {
+  destroyChart('campaignBar')
+  const labels = topCampaigns.map((d) => (d.label.length > 18 ? d.label.slice(0, 18) + '…' : d.label))
+  dashCharts.campaignBar = new Chart(document.getElementById('chartCampaignBar'), {
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Chi phí', data: topCampaigns.map((d) => d.cost), backgroundColor: '#EE4D2D' }] },
+    options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } } }
+  })
+}
+
+const PIE_COLORS = ['#EE4D2D', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#6B7280']
+function renderStatusPie(statusData) {
+  destroyChart('statusPie')
+  dashCharts.statusPie = new Chart(document.getElementById('chartStatusPie'), {
+    type: 'pie',
+    data: { labels: statusData.map((d) => d.label), datasets: [{ data: statusData.map((d) => d.cost), backgroundColor: PIE_COLORS }] },
+    options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+  })
+}
+
+function renderHeatmap(rows, topCampaigns) {
+  const top5 = topCampaigns.slice(0, 5).map((c) => c.label)
+  const cells = []
+  rows.filter((r) => top5.includes(r.ten_dich_vu_hien_thi)).forEach((r) => {
+    const month = `${pad2(r.thang)}/${r.nam}`
+    let cell = cells.find((c) => c.campaign === r.ten_dich_vu_hien_thi && c.month === month)
+    if (!cell) { cell = { campaign: r.ten_dich_vu_hien_thi, month, cost: 0 }; cells.push(cell) }
+    cell.cost += Number(r.chi_phi) || 0
+  })
+
+  const container = document.getElementById('heatmapContainer')
+  if (cells.length === 0) { container.innerHTML = '<p class="text-sm text-gray-400">Không có dữ liệu</p>'; return }
+
+  const campaigns = [...new Set(cells.map((c) => c.campaign))]
+  const months = [...new Set(cells.map((c) => c.month))].sort()
+  const max = Math.max(1, ...cells.map((c) => c.cost))
+  const getCost = (c, m) => cells.find((x) => x.campaign === c && x.month === m)?.cost || 0
+  const colorFor = (v) => `rgba(238, 77, 45, ${(0.08 + (v / max) * 0.85).toFixed(2)})`
+
+  container.innerHTML = `<table class="text-xs">
+    <thead><tr><th class="p-1 text-left text-gray-400">Campaign</th>${months.map((m) => `<th class="p-1 text-gray-400">${m}</th>`).join('')}</tr></thead>
+    <tbody>${campaigns.map((c) => `<tr>
+      <td class="max-w-[160px] truncate p-1 pr-2" title="${escapeHtml(c)}">${escapeHtml(c)}</td>
+      ${months.map((m) => { const v = getCost(c, m); return `<td class="p-1 text-center" title="${formatVND(v)}"><div class="rounded px-2 py-1" style="background:${colorFor(v)}">${v > 0 ? Math.round(v / 1000) + 'k' : ''}</div></td>` }).join('')}
+    </tr>`).join('')}</tbody></table>`
+}
+
+function renderTopTable(containerId, rows, labelHeader) {
+  const container = document.getElementById(containerId)
+  if (rows.length === 0) { container.innerHTML = '<p class="text-sm text-gray-400 py-4 text-center">Không có dữ liệu</p>'; return }
+  container.innerHTML = `<table class="w-full text-left text-sm">
+    <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+      <th class="py-2 pr-3 font-medium text-gray-400">${labelHeader}</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Doanh thu</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Chi phí</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">ROAS</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">ACOS</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">CTR</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Orders</th>
+    </tr></thead>
+    <tbody>${rows.map((r) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+      <td class="max-w-[220px] truncate py-2 pr-3" title="${escapeHtml(r.label)}">${escapeHtml(r.label)}</td>
+      <td class="py-2 pr-3">${formatVND(r.revenue)}</td>
+      <td class="py-2 pr-3">${formatVND(r.cost)}</td>
+      <td class="py-2 pr-3">${r.roas.toFixed(2)}x</td>
+      <td class="py-2 pr-3">${formatPercent(r.acos)}</td>
+      <td class="py-2 pr-3">${formatPercent(r.ctr)}</td>
+      <td class="py-2 pr-3">${formatNumber(r.orders)}</td>
+    </tr>`).join('')}</tbody></table>`
+}
+
+/* -----------------------------------------------------------------------
+   9. TRANG UPLOAD (keo-tha / chon file -> validate -> dong bo Supabase)
+   ----------------------------------------------------------------------- */
+let uploadInitialized = false
+let uploadState = { file: null, parseResult: null }
+
+function uploadSkeletonHTML() {
+  return `
+  <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <h3 class="text-sm font-semibold mb-1">Upload dữ liệu Shopee Ads</h3>
+    <p class="text-xs text-gray-400 mb-4">Hỗ trợ file .xlsx, .xls, .csv đúng định dạng báo cáo Chiến dịch/Từ khóa-Vị trí Shopee</p>
+
+    <div class="mb-4 max-w-xs">
+      <label class="mb-1 block text-xs font-medium text-gray-400">Shop</label>
+      <input id="up_shopName" value="Default Shop" class="w-full rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800" />
+    </div>
+
+    <div id="up_dropzone" class="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-700 p-10 text-center">
+      <div class="mb-3 text-4xl">📁</div>
+      <p class="text-sm font-medium">Kéo & thả file Excel/CSV vào đây</p>
+      <p class="mt-1 text-xs text-gray-400">hoặc bấm để chọn file (.xlsx, .xls, .csv)</p>
+      <input id="up_fileInput" type="file" accept=".xlsx,.xls,.csv" class="hidden-important" />
+    </div>
+
+    <div id="up_parsing" class="hidden-important mt-4"></div>
+    <div id="up_review" class="hidden-important mt-4 flex flex-col gap-4"></div>
+    <div id="up_syncing" class="hidden-important mt-4"></div>
+    <div id="up_done" class="hidden-important mt-4 flex flex-col gap-4"></div>
+  </div>
+
+  <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <h3 class="text-sm font-semibold mb-1">Lịch sử cập nhật dữ liệu</h3>
+    <p class="text-xs text-gray-400 mb-3">Theo dõi thời gian & kết quả mỗi lần đồng bộ</p>
+    <div id="up_historyTable" class="overflow-x-auto"></div>
+  </div>`
+}
+
+function progressBarHTML(percent, label) {
+  return `<p class="mb-1 text-xs text-gray-400">${label}</p>
+    <div class="h-2.5 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
+      <div class="h-full rounded-full bg-brand" style="width:${percent}%"></div>
+    </div>
+    <p class="mt-1 text-right text-xs text-gray-400">${percent}%</p>`
+}
+
+function initUploadPage() {
+  uploadInitialized = true
+  const container = document.getElementById('page-upload')
+  container.innerHTML = uploadSkeletonHTML()
+
+  const dropzone = document.getElementById('up_dropzone')
+  const fileInput = document.getElementById('up_fileInput')
+
+  dropzone.addEventListener('click', () => fileInput.click())
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('border-brand', 'bg-brand-50') })
+  dropzone.addEventListener('dragleave', () => dropzone.classList.remove('border-brand', 'bg-brand-50'))
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault()
+    dropzone.classList.remove('border-brand', 'bg-brand-50')
+    handleFileSelected(e.dataTransfer.files?.[0])
+  })
+  fileInput.addEventListener('change', (e) => handleFileSelected(e.target.files?.[0]))
+
+  loadUploadHistory()
+}
+
+async function handleFileSelected(file) {
+  if (!file) return
+  if (!/\.(xlsx|xls|csv)$/i.test(file.name)) { alert('Chỉ hỗ trợ file .xlsx, .xls hoặc .csv'); return }
+
+  uploadState.file = file
+  showUploadStep('parsing')
+  document.getElementById('up_parsing').innerHTML = progressBarHTML(40, `Đang đọc file ${file.name}...`)
+
+  try {
+    const shopName = document.getElementById('up_shopName').value || 'Default Shop'
+    const result = await parseShopeeAdsFile(file, shopName)
+    uploadState.parseResult = result
+    renderReview(result)
+    showUploadStep('review')
+  } catch (err) {
+    alert('Lỗi đọc file: ' + err.message)
+    showUploadStep('idle')
+  }
+}
+
+function showUploadStep(step) {
+  ;['parsing', 'review', 'syncing', 'done'].forEach((s) => document.getElementById(`up_${s}`).classList.add('hidden-important'))
+  if (step !== 'idle') document.getElementById(`up_${step}`).classList.remove('hidden-important')
+}
+
+function renderReview(result) {
+  const hasIssue = result.missingColumns.length > 0 || result.errors.length > 0
+  let html
+  if (!hasIssue) {
+    html = `<div class="rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">
+      ✅ Định dạng hợp lệ — ${result.totalDataRows} dòng dữ liệu, ${result.rows.length} dòng sẵn sàng để đồng bộ.
+    </div>`
+  } else {
+    html = `<div class="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+      <p class="mb-2 font-semibold">⚠️ Phát hiện lỗi định dạng dữ liệu:</p>
+      ${result.missingColumns.length ? `<div class="mb-2"><p class="font-medium">Thiếu cột bắt buộc:</p><ul class="ml-4 list-disc">${result.missingColumns.map((c) => `<li>${escapeHtml(c)}</li>`).join('')}</ul></div>` : ''}
+      ${result.errors.length ? `<div><p class="font-medium">Lỗi dữ liệu (${result.errors.length} dòng):</p>
+        <ul class="ml-4 max-h-40 list-disc overflow-y-auto">${result.errors.slice(0, 30).map((e) => `<li>Dòng ${e.row}: ${escapeHtml(e.message)}</li>`).join('')}</ul>
+        ${result.errors.length > 30 ? `<p class="mt-1 italic">... và ${result.errors.length - 30} lỗi khác</p>` : ''}</div>` : ''}
+    </div>`
+  }
+
+  html += `<div class="flex gap-3">
+    <button id="up_confirmBtn" class="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white hover:bg-brand-600 disabled:opacity-40" ${(!result.headerValid || result.rows.length === 0) ? 'disabled' : ''}>
+      Đồng bộ ${result.rows.length} dòng lên Supabase
+    </button>
+    <button id="up_resetBtn" class="rounded-lg border px-4 py-2 text-sm border-gray-300 dark:border-gray-700">Chọn file khác</button>
+  </div>`
+
+  document.getElementById('up_review').innerHTML = html
+  document.getElementById('up_confirmBtn')?.addEventListener('click', handleConfirmSync)
+  document.getElementById('up_resetBtn').addEventListener('click', resetUpload)
+}
+
+async function handleConfirmSync() {
+  const result = uploadState.parseResult
+  if (!result?.rows?.length) return
+  showUploadStep('syncing')
+  document.getElementById('up_syncing').innerHTML = progressBarHTML(0, 'Đang đồng bộ dữ liệu lên Supabase...')
+
+  try {
+    const shopName = document.getElementById('up_shopName').value || 'Default Shop'
+    const syncResult = await syncRowsToSupabase(result.rows, {
+      fileName: uploadState.file.name,
+      shopName,
+      userId: currentSession?.user?.id,
+      onProgress: (p) => { document.getElementById('up_syncing').innerHTML = progressBarHTML(p, 'Đang đồng bộ dữ liệu lên Supabase...') }
+    })
+    document.getElementById('up_done').innerHTML = `
+      <div class="rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">
+        ✅ Hoàn tất! Thêm mới: <b>${syncResult.insertedRows}</b> dòng · Cập nhật: <b>${syncResult.updatedRows}</b> dòng
+        ${syncResult.errorRows > 0 ? ` · Lỗi: <b>${syncResult.errorRows}</b> dòng` : ''}
+      </div>
+      <button id="up_afterDoneBtn" class="w-fit rounded-lg border px-4 py-2 text-sm border-gray-300 dark:border-gray-700">Upload file khác</button>`
+    document.getElementById('up_afterDoneBtn').addEventListener('click', resetUpload)
+    showUploadStep('done')
+    loadUploadHistory()
+  } catch (err) {
+    alert('Lỗi đồng bộ Supabase: ' + err.message)
+    showUploadStep('review')
+  }
+}
+
+function resetUpload() {
+  uploadState = { file: null, parseResult: null }
+  document.getElementById('up_fileInput').value = ''
+  showUploadStep('idle')
+}
+
+async function loadUploadHistory() {
+  try {
+    const history = await fetchUploadHistory()
+    const STATUS_STYLE = { success: 'bg-green-100 text-green-700', partial: 'bg-yellow-100 text-yellow-700', failed: 'bg-red-100 text-red-700', processing: 'bg-gray-100 text-gray-600' }
+    const container = document.getElementById('up_historyTable')
+    if (!history?.length) { container.innerHTML = '<p class="text-sm text-gray-400">Chưa có lịch sử upload.</p>'; return }
+    container.innerHTML = `<table class="w-full text-left text-sm">
+      <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+        <th class="py-2 pr-4 font-medium text-gray-400">Thời gian</th>
+        <th class="py-2 pr-4 font-medium text-gray-400">File</th>
+        <th class="py-2 pr-4 font-medium text-gray-400">Shop</th>
+        <th class="py-2 pr-4 font-medium text-gray-400">Tổng dòng</th>
+        <th class="py-2 pr-4 font-medium text-gray-400">Thêm mới</th>
+        <th class="py-2 pr-4 font-medium text-gray-400">Cập nhật</th>
+        <th class="py-2 pr-4 font-medium text-gray-400">Trạng thái</th>
+      </tr></thead>
+      <tbody>${history.map((h) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+        <td class="py-2 pr-4">${new Date(h.created_at).toLocaleString('vi-VN')}</td>
+        <td class="py-2 pr-4">${escapeHtml(h.file_name)}</td>
+        <td class="py-2 pr-4">${escapeHtml(h.shop_name || '')}</td>
+        <td class="py-2 pr-4">${h.total_rows}</td>
+        <td class="py-2 pr-4 text-green-600">${h.inserted_rows}</td>
+        <td class="py-2 pr-4 text-blue-600">${h.updated_rows}</td>
+        <td class="py-2 pr-4"><span class="rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLE[h.status] || ''}">${h.status}</span></td>
+      </tr>`).join('')}</tbody></table>`
+  } catch (err) {
+    document.getElementById('up_historyTable').innerHTML = `<p class="text-sm text-red-500">Lỗi tải lịch sử: ${escapeHtml(err.message)}</p>`
+  }
+}
+
+/* -----------------------------------------------------------------------
+   10. KHOI TAO UNG DUNG
+   ----------------------------------------------------------------------- */
+initTheme()
+initAuth()
+
+</script>
+</body>
+</html>
