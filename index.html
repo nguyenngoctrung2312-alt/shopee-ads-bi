@@ -224,9 +224,17 @@ function toDateOrNull(v) {
   const d = new Date(v)
   return isNaN(d) ? null : toISODate(d)
 }
+// Chuan hoa Unicode ve dang NFC (dau lien). Mot so nguon xuat file Excel
+// (vd may Mac, mot so ban Shopee Seller Center) luu tieng Viet o dang NFD
+// (dau roi: "tr" + "ự" tach thanh "ư" + dau nang rieng) - nhin GIONG HET
+// NFC nhung so sanh chuoi (===) se bi sai khac, khien app bao "thieu cot"
+// du header nhin dung. Luon .normalize('NFC') truoc khi so sanh/luu.
+function nfc(v) {
+  return typeof v === 'string' ? v.normalize('NFC') : v
+}
 function toTextOrNull(v) {
   if (v === null || v === undefined || v === '') return null
-  return String(v).trim()
+  return nfc(String(v).trim())
 }
 const CASTERS = { int: toIntOrZero, float: toFloatOrZero, date: toDateOrNull, text: toTextOrNull }
 
@@ -243,10 +251,10 @@ async function readRawRows(file) {
 }
 
 function findHeaderRowIndex(rows) {
-  const first = COLUMNS[0].header, second = COLUMNS[1].header
+  const first = nfc(COLUMNS[0].header), second = nfc(COLUMNS[1].header)
   for (let i = 0; i < Math.min(rows.length, 20); i++) {
     const row = rows[i] || []
-    if (String(row[0] ?? '').trim() === first && String(row[1] ?? '').trim() === second) return i
+    if (nfc(String(row[0] ?? '').trim()) === first && nfc(String(row[1] ?? '').trim()) === second) return i
   }
   return -1
 }
@@ -266,12 +274,12 @@ async function parseShopeeAdsFile(file, shopName) {
     }
   }
 
-  const headerRow = (rawRows[headerIdx] || []).map((h) => String(h ?? '').trim())
-  const missingColumns = COLUMNS.filter((c) => !headerRow.includes(c.header)).map((c) => c.header)
+  const headerRow = (rawRows[headerIdx] || []).map((h) => nfc(String(h ?? '').trim()))
+  const missingColumns = COLUMNS.filter((c) => !headerRow.includes(nfc(c.header))).map((c) => c.header)
   const headerValid = missingColumns.length === 0
 
   const colIndexByKey = {}
-  COLUMNS.forEach((c) => { colIndexByKey[c.key] = headerRow.indexOf(c.header) })
+  COLUMNS.forEach((c) => { colIndexByKey[c.key] = headerRow.indexOf(nfc(c.header)) })
 
   const dataRows = rawRows.slice(headerIdx + 1).filter((r) => r && r.some((cell) => cell !== null && cell !== undefined && cell !== ''))
 
