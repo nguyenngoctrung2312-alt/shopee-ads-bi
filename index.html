@@ -1420,7 +1420,12 @@ function computeHourly(assumptions, planResult, hourlyPlan) {
   const totalMonthlyBudget = products.reduce((s, p) => s + p.budgetMonthly, 0)
   const ratios = products.map((p) => (totalMonthlyBudget > 0 ? p.budgetMonthly / totalMonthlyBudget : 1 / products.length))
   const normalDays = planResult.rows.filter((r) => r.phase === 'Normal')
-  const normalRepBudget = normalDays.length ? normalDays.reduce((s, r) => s + r.totalBudget, 0) / normalDays.length : 0
+  const autoNormalRepBudget = normalDays.length ? normalDays.reduce((s, r) => s + r.totalBudget, 0) / normalDays.length : 0
+  // Ngan sach dai dien Ngay thuong: mac dinh TU DONG = TB cac ngay Normal
+  // (giong AVERAGEIF trong file goc), nhung nguoi dung co the GHI DE bang tay
+  // (hourlyPlan.normalRepBudget != null) - bam nut "Tu dong" se xoa ghi de.
+  const isNormalOverridden = hourlyPlan.normalRepBudget !== null && hourlyPlan.normalRepBudget !== undefined
+  const normalRepBudget = isNormalOverridden ? hourlyPlan.normalRepBudget : autoNormalRepBudget
 
   function process(slots, repBudget) {
     const cum = products.map(() => 0)
@@ -1440,7 +1445,8 @@ function computeHourly(assumptions, planResult, hourlyPlan) {
   return {
     bigSale: process(hourlyPlan.bigSale, hourlyPlan.bigSaleRepBudget || 0),
     normal: process(hourlyPlan.normal, normalRepBudget),
-    normalRepBudget
+    autoNormalRepBudget,
+    isNormalOverridden
   }
 }
 
@@ -1516,6 +1522,7 @@ function initMediaPlanPage() {
   // sua trong trang chi tiet Ke hoach (container ton tai on dinh, chi
   // innerHTML ben trong doi khi tinh lai - nen chi can gan 1 lan duy nhat).
   document.getElementById('mp_detail').addEventListener('change', handleMpFieldChange)
+  document.getElementById('mp_detail').addEventListener('click', handleMpDetailClick)
 
   loadMediaPlanList()
 }
@@ -1885,9 +1892,12 @@ async function showMediaPlanDetail(planId) {
 }
 
 /* ---- Cac ham sinh HTML cho tung khoi editable/computed cua trang chi tiet ---- */
-function mpProductCardHTML(p, idx) {
+function mpProductCardHTML(p, idx, canDelete) {
   return `<div class="rounded-lg border border-gray-200 dark:border-gray-800 p-3">
-    <p class="text-sm font-semibold mb-2">${escapeHtml(p.name)}</p>
+    <div class="mb-2 flex items-center gap-2">
+      <input type="text" data-mp="product-name" data-idx="${idx}" value="${escapeHtml(p.name)}" class="flex-1 rounded border px-2 py-1 text-sm font-semibold border-gray-300 dark:border-gray-700 dark:bg-gray-800" />
+      ${canDelete ? `<button type="button" data-mp-action="remove-product" data-idx="${idx}" class="shrink-0 rounded border px-2 py-1 text-xs text-red-600 border-red-200 dark:border-red-900/60 hover:bg-red-50 dark:hover:bg-red-900/20" title="Xóa sản phẩm này khỏi Kế hoạch">🗑</button>` : ''}
+    </div>
     <div class="grid grid-cols-2 gap-2 text-xs">
       <label class="flex flex-col gap-1">Ngân sách tháng (đ)
         <input type="number" step="1000" data-mp="product-budget" data-idx="${idx}" value="${p.budgetMonthly || 0}" class="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></label>
@@ -1933,23 +1943,57 @@ function mpPhaseMultHTML(assumptions) {
   </details>`
 }
 
+function mpIndustryBenchmarkHTML() {
+  return `<details class="mt-3">
+    <summary class="cursor-pointer text-xs font-medium text-gray-500">📊 Chuẩn tham khảo ngành Nhà cửa & Đời sống / Chăn ga gối nệm (Shopee VN) — dùng để cân nhắc khi chỉnh benchmark ở trên</summary>
+    <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 text-xs text-gray-500 dark:text-gray-400">
+      <div class="rounded-lg border border-gray-200 dark:border-gray-800 p-3">
+        <p class="font-medium text-gray-600 dark:text-gray-300 mb-1">Nhóm giá trị cao / cân nhắc lâu (vd nệm, nội thất lớn)</p>
+        <ul class="list-disc ml-4 space-y-0.5">
+          <li>CPC: 2.500 – 4.800 đ</li>
+          <li>CTR: 1,2% – 3,5%</li>
+          <li>CR (Conversion Rate): 1,0% – 4,0%</li>
+          <li>Add To Cart Rate: 4,0% – 12,0%</li>
+          <li>ROAS mục tiêu: 8x – 18x</li>
+        </ul>
+      </div>
+      <div class="rounded-lg border border-gray-200 dark:border-gray-800 p-3">
+        <p class="font-medium text-gray-600 dark:text-gray-300 mb-1">Nhóm giá trị thấp / mua nhanh theo cảm tính (vd chăn, gối, phụ kiện)</p>
+        <ul class="list-disc ml-4 space-y-0.5">
+          <li>CPC: 1.200 – 3.200 đ</li>
+          <li>CTR: 1,5% – 4,0%</li>
+          <li>CR (Conversion Rate): 1,5% – 5,0%</li>
+          <li>Add To Cart Rate: 5,0% – 15,0%</li>
+          <li>ROAS mục tiêu: 3x – 8x</li>
+        </ul>
+      </div>
+    </div>
+    <p class="mt-2 text-[11px] text-gray-400">Hệ số tăng ngày Sale tham khảo: CPC ×1,1–1,4 · CR ×1,3–1,9. Hệ số cuối tuần tham khảo: ×1,05–1,25. Đây là mức tham khảo phổ biến của ngành (không phải số liệu thật từ Shopee API) — nên hiệu chỉnh lại bằng số liệu thực tế sau 7–14 ngày chạy quảng cáo, xem mục "Kế hoạch vs Thực tế" bên dưới.</p>
+  </details>`
+}
+
 function mpKpiCardsHTML(monthTotal) {
+  const roasB = evalBenchmark('roas', monthTotal.roas)
+  const ctrB = evalBenchmark('ctr', monthTotal.ctr * 100)
+  const crB = evalBenchmark('cvr', monthTotal.cr * 100)
   const items = [
     { label: 'Tổng ngân sách', value: formatVND(monthTotal.budget) },
     { label: 'GMV kỳ vọng', value: formatVND(monthTotal.gmv) },
     { label: 'Đơn hàng kỳ vọng', value: formatNumber(monthTotal.order) },
-    { label: 'ROAS kỳ vọng', value: monthTotal.roas.toFixed(2) + 'x' },
+    { label: 'ROAS kỳ vọng', value: monthTotal.roas.toFixed(2) + 'x', badge: roasB },
     { label: 'CPC bình quân', value: formatVND(monthTotal.cpc) },
-    { label: 'CTR bình quân', value: formatPercent(monthTotal.ctr * 100) },
-    { label: 'CR bình quân', value: formatPercent(monthTotal.cr * 100) },
+    { label: 'CTR bình quân', value: formatPercent(monthTotal.ctr * 100), badge: ctrB },
+    { label: 'CR bình quân', value: formatPercent(monthTotal.cr * 100), badge: crB },
     { label: 'CPA bình quân', value: formatVND(monthTotal.cpa) }
   ]
   return `<div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
     ${items.map((i) => `<div class="rounded-lg border border-gray-200 dark:border-gray-800 p-3">
       <p class="text-xs text-gray-400">${i.label}</p>
       <p class="mt-1 text-base font-bold">${i.value}</p>
+      ${i.badge ? `<span class="mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-medium ${i.badge.color}">${i.badge.label}</span>` : ''}
     </div>`).join('')}
-  </div>`
+  </div>
+  <p class="mt-2 text-[11px] text-gray-400">* Tổng ngân sách tính ra có thể chênh vài nghìn đồng so với Ngân sách tháng đã nhập ở trên — do mỗi ngày được làm tròn về hàng nghìn đồng (giống đúng công thức ROUND trong file Excel gốc), chênh lệch này không đáng kể (thường dưới 0,05%).</p>`
 }
 
 function mpProductBreakdownTableHTML(perProductTotal) {
@@ -1962,14 +2006,17 @@ function mpProductBreakdownTableHTML(perProductTotal) {
       <th class="py-2 pr-3 font-medium text-gray-400">ROAS</th>
       <th class="py-2 pr-3 font-medium text-gray-400">CPA</th>
     </tr></thead>
-    <tbody>${perProductTotal.map((p) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+    <tbody>${perProductTotal.map((p) => {
+      const b = evalBenchmark('roas', p.roas)
+      return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
       <td class="py-2 pr-3">${escapeHtml(p.name)}</td>
       <td class="py-2 pr-3">${formatVND(p.budget)}</td>
       <td class="py-2 pr-3">${formatVND(p.gmv)}</td>
       <td class="py-2 pr-3">${formatNumber(p.order)}</td>
-      <td class="py-2 pr-3">${p.roas.toFixed(2)}x</td>
+      <td class="py-2 pr-3">${p.roas.toFixed(2)}x <span class="ml-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${b.color}">${b.label}</span></td>
       <td class="py-2 pr-3">${formatVND(p.cpa)}</td>
-    </tr>`).join('')}</tbody>
+    </tr>`
+    }).join('')}</tbody>
   </table>`
 }
 
@@ -2045,8 +2092,9 @@ function mpDailyTableHTML(planResult) {
   </table></div>`
 }
 
-function mpHourlyTableHTML(groupKey, groupLabel, hourlyResult, repBudgetEditable) {
+function mpHourlyTableHTML(groupKey, groupLabel, hourlyResult) {
   const g = hourlyResult[groupKey]
+  const isNormal = groupKey === 'normal'
   const pctTotalPct = g.pctTotal * 100
   const warnOk = Math.abs(pctTotalPct - 100) <= 0.5
   const rows = g.slots.map((s, idx) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0 align-top">
@@ -2059,12 +2107,15 @@ function mpHourlyTableHTML(groupKey, groupLabel, hourlyResult, repBudgetEditable
     <td class="py-1.5 pr-2 min-w-[220px]"><textarea rows="2" data-mp="hourly-slot" data-group="${groupKey}" data-idx="${idx}" data-key="reason" class="w-full rounded border px-1.5 py-1 text-xs border-gray-300 dark:border-gray-700 dark:bg-gray-800">${escapeHtml(s.reason || '')}</textarea></td>
   </tr>`).join('')
 
+  const repBudgetControlHtml = isNormal
+    ? `<input type="number" step="1000" data-mp="hourly-rep-budget" data-group="normal" value="${Math.round(g.repBudget)}" class="w-32 rounded border px-1.5 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" />
+       <button type="button" data-mp-action="reset-normal-rep-budget" class="ml-1 rounded border px-2 py-1 text-[11px] border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-white/5" title="Đặt lại = trung bình các ngày Normal">🔄 Tự động</button>
+       ${hourlyResult.isNormalOverridden ? '<span class="ml-1 text-amber-600">(đang ghi đè thủ công, TB tự động = ' + formatVND(hourlyResult.autoNormalRepBudget) + ')</span>' : '<span class="ml-1 text-gray-400">(đang tự động = TB các ngày Normal)</span>'}`
+    : `<input type="number" step="1000" data-mp="hourly-rep-budget" data-group="bigSale" value="${g.repBudget}" class="w-32 rounded border px-1.5 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" />`
+
   return `<div class="mb-2 flex flex-wrap items-center justify-between gap-2">
       <h4 class="text-sm font-semibold">${groupLabel}</h4>
-      <p class="text-xs">Ngân sách đại diện/ngày:
-        ${repBudgetEditable
-          ? `<input type="number" step="1000" data-mp="hourly-rep-budget" value="${g.repBudget}" class="w-32 rounded border px-1.5 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" />`
-          : `<b>${formatVND(g.repBudget)}</b> <span class="text-gray-400">(tự động = TB các ngày Normal)</span>`}
+      <p class="text-xs flex flex-wrap items-center gap-1">Ngân sách đại diện/ngày: ${repBudgetControlHtml}
         · Tổng tỷ lệ: <b class="${warnOk ? 'text-green-600' : 'text-red-600'}">${pctTotalPct.toFixed(1)}%</b>${warnOk ? ' ✓' : ' ⚠️ nên = 100%'}
       </p>
     </div>
@@ -2090,7 +2141,9 @@ function handleMpFieldChange(e) {
   const kind = el.dataset.mp
   const val = el.value
 
-  if (kind === 'product-budget') {
+  if (kind === 'product-name') {
+    mpEdit.assumptions.products[+el.dataset.idx].name = val || `Sản phẩm ${+el.dataset.idx + 1}`
+  } else if (kind === 'product-budget') {
     mpEdit.assumptions.products[+el.dataset.idx].budgetMonthly = toFloatOrZero(val)
   } else if (kind === 'product-rate') {
     const key = el.dataset.key
@@ -2107,11 +2160,38 @@ function handleMpFieldChange(e) {
   } else if (kind === 'day-note') {
     mpEdit.dailyPlan[+el.dataset.idx].note = val
   } else if (kind === 'hourly-rep-budget') {
-    mpEdit.hourlyPlan.bigSaleRepBudget = toFloatOrZero(val)
+    if (el.dataset.group === 'normal') mpEdit.hourlyPlan.normalRepBudget = toFloatOrZero(val)
+    else mpEdit.hourlyPlan.bigSaleRepBudget = toFloatOrZero(val)
   } else if (kind === 'hourly-slot') {
     const group = el.dataset.group, idx = +el.dataset.idx, key = el.dataset.key
     const slot = mpEdit.hourlyPlan[group][idx]
     slot[key] = key === 'pct' ? toFloatOrZero(val) / 100 : val
+  } else {
+    return
+  }
+
+  scheduleMpAutosave()
+  renderMediaPlanDetail(true)
+}
+
+/* ---- Xu ly click cho cac nut hanh dong (Them/Xoa san pham, Dat lai Tu dong)
+   - gan 1 lan duy nhat tren #mp_detail luc initMediaPlanPage, tuong tu
+   handleMpFieldChange nhung cho su kien 'click' (button khong bao 'change'). */
+function handleMpDetailClick(e) {
+  const el = e.target.closest('[data-mp-action]')
+  if (!el || !mpEdit) return
+  const action = el.dataset.mpAction
+
+  if (action === 'reset-normal-rep-budget') {
+    mpEdit.hourlyPlan.normalRepBudget = null
+  } else if (action === 'add-product') {
+    const n = mpEdit.assumptions.products.length + 1
+    mpEdit.assumptions.products.push({ name: `Sản phẩm ${n}`, budgetMonthly: 0, cpc: 0, ctr: 0, cr: 0, atc: 0, aov: 0 })
+  } else if (action === 'remove-product') {
+    const idx = +el.dataset.idx
+    if (mpEdit.assumptions.products.length <= 1) { alert('Kế hoạch cần ít nhất 1 sản phẩm.'); return }
+    if (!confirm(`Xóa sản phẩm "${mpEdit.assumptions.products[idx].name}" khỏi Kế hoạch? (Ngân sách các sản phẩm còn lại giữ nguyên, bạn có thể chỉnh lại Tổng ngân sách nếu cần.)`)) return
+    mpEdit.assumptions.products.splice(idx, 1)
   } else {
     return
   }
@@ -2221,11 +2301,13 @@ function renderMediaPlanDetail(preserveScroll) {
 
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
       <h3 class="text-sm font-semibold mb-3">Giả định & Ngân sách (chỉnh sửa được)</h3>
-      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 mb-4">
-        ${assumptions.products.map((p, idx) => mpProductCardHTML(p, idx)).join('')}
+      <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3 mb-2">
+        ${assumptions.products.map((p, idx) => mpProductCardHTML(p, idx, assumptions.products.length > 1)).join('')}
       </div>
+      <button type="button" data-mp-action="add-product" class="mb-4 rounded-lg border px-3 py-1.5 text-xs font-medium border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-white/5">+ Thêm sản phẩm</button>
       ${mpPhaseWeightsHTML(assumptions)}
       ${mpPhaseMultHTML(assumptions)}
+      ${mpIndustryBenchmarkHTML()}
     </div>
 
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
@@ -2252,8 +2334,8 @@ function renderMediaPlanDetail(preserveScroll) {
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
       <h3 class="text-sm font-semibold mb-1">Phân bổ Ngân sách theo Khung giờ (chỉnh sửa được)</h3>
       <p class="text-xs text-gray-400 mb-4">Áp dụng cho 1 ngày đại diện — dùng để phân bổ bid/ngân sách trong ngày Big Sale và ngày thường.</p>
-      <div class="mb-6">${mpHourlyTableHTML('bigSale', '🔥 Ngày Big Sale', hourlyResult, true)}</div>
-      <div>${mpHourlyTableHTML('normal', '📅 Ngày thường (Normal)', hourlyResult, false)}</div>
+      <div class="mb-6">${mpHourlyTableHTML('bigSale', '🔥 Ngày Big Sale', hourlyResult)}</div>
+      <div>${mpHourlyTableHTML('normal', '📅 Ngày thường (Normal)', hourlyResult)}</div>
     </div>
 
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
