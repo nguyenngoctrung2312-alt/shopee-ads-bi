@@ -1307,15 +1307,161 @@ async function loadUploadHistory() {
 }
 
 /* -----------------------------------------------------------------------
-   9b. TRANG KE HOACH THANG (MEDIA PLAN)
-   Upload file "MediaPlan_ThangX_20XX.xlsx" -> trich xuat phan Muc tieu
-   Ngan sach/KPI + Phan bo Giai doan (sheet 01_Dashboard) -> luu vao
-   media_plans/media_plan_phases, luu FILE GOC vao Supabase Storage (bucket
-   "media-plans") de xem/tai lai day du 14 sheet. Xem chi tiet 1 Ke hoach se
-   tu doi chieu voi so lieu THUC TE (ads_campaign_reports) cung Shop/Thang.
+   9b. TRANG KE HOACH THANG (MEDIA PLAN) - PHIEN BAN EDITABLE + TU TINH LAI
+   Khac voi ban dau (chi xem tom tat, read-only), ban nay:
+   - Trich xuat DAY DU: gia dinh/benchmark (Z1_GiaDinh_ThamSo), phan bo 31
+     ngay (02_PhanBo_31Ngay), phan bo theo khung gio (03_PhanBo_TheoGio).
+   - Cho SUA TRUC TIEP moi thong so tren Web (ngan sach, giai doan, benchmark
+     CPC/CTR/CR/ATC/AOV...) - cac cot ket qua (Click/GMV/Don hang/ROAS...)
+     TU DONG TINH LAI ngay tren trinh duyet bang dung cong thuc cua file goc
+     (xem computePlan/computeHourly), giong co che cong thuc trong Excel.
+   - TU DONG LUU (debounce ~900ms sau lan sua cuoi) vao cot JSONB
+     media_plans.assumptions / daily_plan / hourly_plan.
+   File goc van duoc luu nguyen ven trong Supabase Storage de doi chieu/tai ve.
    ----------------------------------------------------------------------- */
 let mediaPlanInitialized = false
 let mediaPlanState = { file: null, parsed: null }
+let mpEdit = null // trang thai dang sua: { plan, assumptions, dailyPlan, hourlyPlan, ... }
+
+const MP_PHASES = ['Sale', 'Pre-heat', 'Sustain', 'Normal']
+const MP_PHASE_BADGE = { Sale: 'bg-red-50 dark:bg-red-900/30', 'Pre-heat': 'bg-orange-50 dark:bg-orange-900/30', Sustain: 'bg-blue-50 dark:bg-blue-900/30', Normal: 'bg-gray-50 dark:bg-gray-800' }
+const MP_DEFAULT_ASSUMPTIONS = {
+  phaseWeights: { Sale: 5, 'Pre-heat': 2.5, Sustain: 1.8, Normal: 1 },
+  weekendMultiplier: 1.15,
+  phaseMultipliers: {
+    Normal: { cpc: 1, ctr: 1, cr: 1, atc: 1 },
+    'Pre-heat': { cpc: 1.05, ctr: 1.1, cr: 1, atc: 1.08 },
+    Sale: { cpc: 1.2, ctr: 1.35, cr: 1.6, atc: 1.45 },
+    Sustain: { cpc: 1.08, ctr: 1.15, cr: 1.2, atc: 1.2 }
+  }
+}
+
+/* ---- CONG THUC ENGINE (tai hien dung cong thuc goc trong Z1/02/Z2/03) ----
+   Da doi chieu khop tung dong voi file MediaPlan_Thang7_2026.xlsx (vd ngay
+   01/07: budget Nem=1.233.000d/Chan=822.000d, GMV=30.477.020d, Don=29,
+   ROAS=14.83x - tinh dung 100% theo cong thuc duoi day). Sua bat ky dau vao
+   (ngan sach, trong so, benchmark...) se tu tinh lai toan bo. */
+function computePlan(assumptions, dailyPlan) {
+  const products = assumptions.products
+  const days = dailyPlan.map((d) => {
+    const dow = new Date(d.date + 'T00:00:00').getDay() // 0=CN,6=T7
+    const isWeekend = dow === 0 || dow === 6
+    const phaseW = assumptions.phaseWeights[d.phase] ?? 1
+    const weight = phaseW * (isWeekend ? assumptions.weekendMultiplier : 1)
+    return { ...d, isWeekend, weight }
+  })
+  const totalWeight = days.reduce((s, d) => s + d.weight, 0)
+  const unitPerWeight = products.map((p) => (totalWeight > 0 ? p.budgetMonthly / totalWeight : 0))
+
+  const rows = days.map((d) => {
+    const mult = assumptions.phaseMultipliers[d.phase] || { cpc: 1, ctr: 1, cr: 1, atc: 1 }
+    const perProduct = products.map((p, idx) => {
+      const budget = Math.round((d.weight * unitPerWeight[idx]) / 1000) * 1000
+      const cpc = p.cpc * mult.cpc
+      const ctr = p.ctr * mult.ctr
+      const cr = p.cr * mult.cr
+      const atc = p.atc * mult.atc
+      const aov = p.aov
+      const click = cpc > 0 ? budget / cpc : 0
+      const impr = ctr > 0 ? click / ctr : 0
+      const order = click * cr
+      const gmv = order * aov
+      const cpa = order > 0 ? budget / order : 0
+      return { name: p.name, budget, cpc, ctr, cr, atc, aov, click, impr, order, gmv, cpa }
+    })
+    const totalBudget = perProduct.reduce((s, x) => s + x.budget, 0)
+    const totalClick = perProduct.reduce((s, x) => s + x.click, 0)
+    const totalImpr = perProduct.reduce((s, x) => s + x.impr, 0)
+    const totalOrder = perProduct.reduce((s, x) => s + x.order, 0)
+    const totalGMV = perProduct.reduce((s, x) => s + x.gmv, 0)
+    const roas = totalBudget > 0 ? totalGMV / totalBudget : 0
+    const blendedCpc = totalClick > 0 ? totalBudget / totalClick : 0
+    const blendedCtr = totalImpr > 0 ? totalClick / totalImpr : 0
+    const blendedCr = totalClick > 0 ? totalOrder / totalClick : 0
+    const blendedAtc = totalClick > 0 ? perProduct.reduce((s, x) => s + x.click * x.atc, 0) / totalClick : 0
+    return { ...d, perProduct, totalBudget, totalClick, totalImpr, totalOrder, totalGMV, roas, blendedCpc, blendedCtr, blendedCr, blendedAtc }
+  })
+
+  const monthTotal = {
+    budget: rows.reduce((s, r) => s + r.totalBudget, 0),
+    gmv: rows.reduce((s, r) => s + r.totalGMV, 0),
+    order: rows.reduce((s, r) => s + r.totalOrder, 0),
+    click: rows.reduce((s, r) => s + r.totalClick, 0),
+    impr: rows.reduce((s, r) => s + r.totalImpr, 0)
+  }
+  monthTotal.roas = monthTotal.budget > 0 ? monthTotal.gmv / monthTotal.budget : 0
+  monthTotal.cpc = monthTotal.click > 0 ? monthTotal.budget / monthTotal.click : 0
+  monthTotal.ctr = monthTotal.impr > 0 ? monthTotal.click / monthTotal.impr : 0
+  monthTotal.cr = monthTotal.click > 0 ? monthTotal.order / monthTotal.click : 0
+  monthTotal.cpa = monthTotal.order > 0 ? monthTotal.budget / monthTotal.order : 0
+
+  const perProductTotal = products.map((p, idx) => {
+    const budget = rows.reduce((s, r) => s + r.perProduct[idx].budget, 0)
+    const gmv = rows.reduce((s, r) => s + r.perProduct[idx].gmv, 0)
+    const order = rows.reduce((s, r) => s + r.perProduct[idx].order, 0)
+    return { name: p.name, budget, gmv, order, roas: budget > 0 ? gmv / budget : 0, cpa: order > 0 ? budget / order : 0 }
+  })
+
+  const phaseGroupsMap = {}
+  rows.forEach((r) => {
+    if (!phaseGroupsMap[r.phase]) phaseGroupsMap[r.phase] = { phase: r.phase, days: 0, budget: 0, gmv: 0, order: 0 }
+    const g = phaseGroupsMap[r.phase]
+    g.days++; g.budget += r.totalBudget; g.gmv += r.totalGMV; g.order += r.totalOrder
+  })
+  const phaseSummary = Object.values(phaseGroupsMap)
+    .map((g) => ({ ...g, budgetPct: monthTotal.budget > 0 ? (g.budget / monthTotal.budget) * 100 : 0, roas: g.budget > 0 ? g.gmv / g.budget : 0 }))
+    .sort((a, b) => MP_PHASES.indexOf(a.phase) - MP_PHASES.indexOf(b.phase))
+
+  return { rows, totalWeight, monthTotal, perProductTotal, phaseSummary }
+}
+
+function computeHourly(assumptions, planResult, hourlyPlan) {
+  const products = assumptions.products
+  const totalMonthlyBudget = products.reduce((s, p) => s + p.budgetMonthly, 0)
+  const ratios = products.map((p) => (totalMonthlyBudget > 0 ? p.budgetMonthly / totalMonthlyBudget : 1 / products.length))
+  const normalDays = planResult.rows.filter((r) => r.phase === 'Normal')
+  const normalRepBudget = normalDays.length ? normalDays.reduce((s, r) => s + r.totalBudget, 0) / normalDays.length : 0
+
+  function process(slots, repBudget) {
+    const cum = products.map(() => 0)
+    let pctTotal = 0
+    const outSlots = (slots || []).map((s) => {
+      const budget = (s.pct || 0) * repBudget
+      pctTotal += (s.pct || 0)
+      const perProduct = products.map((p, idx) => {
+        cum[idx] += ratios[idx] * budget
+        return { name: p.name, slotBudget: ratios[idx] * budget, cumBudget: cum[idx] }
+      })
+      return { ...s, budget, perProduct }
+    })
+    return { slots: outSlots, repBudget, pctTotal, totalBudget: outSlots.reduce((s, x) => s + x.budget, 0) }
+  }
+
+  return {
+    bigSale: process(hourlyPlan.bigSale, hourlyPlan.bigSaleRepBudget || 0),
+    normal: process(hourlyPlan.normal, normalRepBudget),
+    normalRepBudget
+  }
+}
+
+function buildPlanSummaryFields(assumptions, dailyPlan) {
+  const plan = computePlan(assumptions, dailyPlan)
+  const totalClick = plan.monthTotal.click
+  const blendedAtc = totalClick > 0 ? plan.rows.reduce((s, r) => s + r.blendedAtc * r.totalClick, 0) / totalClick : 0
+  return {
+    total_budget: plan.monthTotal.budget,
+    roas_target: plan.monthTotal.roas,
+    cpa_target: plan.monthTotal.cpa,
+    cpc_target: plan.monthTotal.cpc,
+    ctr_target: plan.monthTotal.ctr * 100,
+    cvr_target: plan.monthTotal.cr * 100,
+    atc_rate_target: blendedAtc * 100,
+    gmv_target: plan.monthTotal.gmv,
+    orders_target: plan.monthTotal.order,
+    aov_assumption: plan.monthTotal.order > 0 ? plan.monthTotal.gmv / plan.monthTotal.order : 0,
+    product_breakdown: plan.perProductTotal
+  }
+}
 
 function mediaPlanSkeletonHTML() {
   return `
@@ -1366,10 +1512,168 @@ function initMediaPlanPage() {
   })
   fileInput.addEventListener('change', (e) => handleMediaPlanFileSelected(e.target.files?.[0]))
 
+  // Delegated change listener cho TOAN BO cac o input/select/textarea co the
+  // sua trong trang chi tiet Ke hoach (container ton tai on dinh, chi
+  // innerHTML ben trong doi khi tinh lai - nen chi can gan 1 lan duy nhat).
+  document.getElementById('mp_detail').addEventListener('change', handleMpFieldChange)
+
   loadMediaPlanList()
 }
 
-/** Doc file Media Plan: lay Thang/Nam tu TEN FILE, cac chi so tu sheet 01_Dashboard */
+/** Doc bang "Chi so / Toan Shop" (Section A, sheet 01_Dashboard) - chi lay
+ * ten 2 san pham + ngan sach thang tung san pham, phan con lai (CPC/CTR/CR/
+ * ATC/AOV/GMV/ROAS...) se duoc TINH LAI tu Z1_GiaDinh_ThamSo + 02_PhanBo_31Ngay
+ * (khong doc truc tiep tu 01_Dashboard nua vi do la SO DA TINH SAN, khong
+ * phai dau vao). */
+function parseDashboardBasics(wb) {
+  const dashSheet = wb.Sheets['01_Dashboard']
+  if (!dashSheet) throw new Error('Không tìm thấy sheet "01_Dashboard" trong file. Đảm bảo dùng đúng file mẫu Media Plan.')
+  const dashRows = XLSX.utils.sheet_to_json(dashSheet, { header: 1, raw: true, defval: null })
+  const norm = (v) => nfc(String(v ?? '').trim())
+
+  const headerIdx = dashRows.findIndex((r) => norm(r?.[0]) === 'Chỉ số')
+  if (headerIdx === -1) throw new Error('Không tìm thấy bảng "Chỉ số / Toàn Shop" trong sheet 01_Dashboard.')
+  const productNames = [norm(dashRows[headerIdx][2]) || 'Sản phẩm 1', norm(dashRows[headerIdx][3]) || 'Sản phẩm 2']
+
+  const budgets = [0, 0]
+  for (let i = headerIdx + 1; i < dashRows.length; i++) {
+    const label = norm(dashRows[i]?.[0]).toLowerCase()
+    if (!label) break
+    if (label.includes('ngân sách') && (label.includes('tổng') || label.includes('ads'))) {
+      budgets[0] = toFloatOrZero(dashRows[i][2])
+      budgets[1] = toFloatOrZero(dashRows[i][3])
+      break
+    }
+  }
+  return { productNames, budgets }
+}
+
+/** Doc "cong thuc dau vao" tu sheet Z1_GiaDinh_ThamSo: trong so ngan sach
+ * theo giai doan, he so cuoi tuan, benchmark CPC/CTR/CR/ATC/AOV goc (Base -
+ * Normal) tung san pham, he so nhan theo giai doan. Neu file khong co sheet
+ * nay (vd file cu hon) -> dung MP_DEFAULT_ASSUMPTIONS lam du phong. */
+function parseZ1Assumptions(wb, productNames) {
+  const sheet = wb.Sheets['Z1_GiaDinh_ThamSo']
+  const products = productNames.map((name) => ({ name, budgetMonthly: 0, cpc: 0, ctr: 0, cr: 0, atc: 0, aov: 0 }))
+  if (!sheet) return { ...JSON.parse(JSON.stringify(MP_DEFAULT_ASSUMPTIONS)), products }
+
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null })
+  const norm = (v) => nfc(String(v ?? '').trim())
+  const lower = (v) => norm(v).toLowerCase()
+
+  // 1) Trong so theo Giai doan + He so Cuoi tuan
+  const phaseWeights = {}
+  let weekendMultiplier = MP_DEFAULT_ASSUMPTIONS.weekendMultiplier
+  const wHeaderIdx = rows.findIndex((r) => norm(r?.[1]) === 'Giai đoạn' && lower(r?.[2]).includes('trọng số'))
+  if (wHeaderIdx !== -1) {
+    for (let i = wHeaderIdx + 1; i < rows.length; i++) {
+      const name = norm(rows[i]?.[1])
+      if (!name) break
+      if (lower(name).includes('cuối tuần')) { weekendMultiplier = toFloatOrZero(rows[i][2]); continue }
+      if (!MP_PHASES.includes(name)) break
+      phaseWeights[name] = toFloatOrZero(rows[i][2])
+    }
+  }
+  MP_PHASES.forEach((p) => { if (phaseWeights[p] === undefined) phaseWeights[p] = MP_DEFAULT_ASSUMPTIONS.phaseWeights[p] })
+
+  // 2) Benchmark goc "(Base - Normal)" tung san pham - lay THEO THU TU xuat
+  // hien (khop voi thu tu san pham o 01_Dashboard), tranh phu thuoc ten
+  // san pham viet chinh xac giong het giua cac sheet.
+  let pIdx = 0
+  rows.forEach((r) => {
+    const phaseLabel = lower(r?.[2])
+    if (!phaseLabel.includes('base') || !phaseLabel.includes('normal')) return
+    if (pIdx >= products.length) return
+    const target = products[pIdx]
+    target.cpc = toFloatOrZero(r[3]); target.ctr = toFloatOrZero(r[4]); target.cr = toFloatOrZero(r[5])
+    target.atc = toFloatOrZero(r[6]); target.aov = toFloatOrZero(r[7])
+    pIdx++
+  })
+
+  // 3) He so nhan theo Giai doan (ap len benchmark goc)
+  const phaseMultipliers = {}
+  const mHeaderIdx = rows.findIndex((r) => norm(r?.[2]) === 'Giai đoạn' && lower(r?.[3]).includes('hệ số cpc'))
+  if (mHeaderIdx !== -1) {
+    for (let i = mHeaderIdx + 1; i < rows.length; i++) {
+      const name = norm(rows[i]?.[2])
+      if (!MP_PHASES.includes(name)) break
+      phaseMultipliers[name] = { cpc: toFloatOrZero(rows[i][3]), ctr: toFloatOrZero(rows[i][4]), cr: toFloatOrZero(rows[i][5]), atc: toFloatOrZero(rows[i][6]) }
+    }
+  }
+  MP_PHASES.forEach((p) => { if (!phaseMultipliers[p]) phaseMultipliers[p] = MP_DEFAULT_ASSUMPTIONS.phaseMultipliers[p] })
+
+  return { phaseWeights, weekendMultiplier, phaseMultipliers, products }
+}
+
+/** Doc bang Phan bo 31 ngay (sheet 02_PhanBo_31Ngay): CHI lay phan nguoi dung
+ * duoc sua (Ngay/Giai doan/Ghi chu) - cac cot con lai la ket qua tinh toan,
+ * se duoc tinh lai boi computePlan() thay vi doc san tu file. */
+function parseDailyPlan(wb) {
+  const sheet = wb.Sheets['02_PhanBo_31Ngay']
+  if (!sheet) return []
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null })
+  const norm = (v) => nfc(String(v ?? '').trim())
+  const headerIdx = rows.findIndex((r) => norm(r?.[0]) === 'Ngày' && norm(r?.[2]) === 'Giai đoạn')
+  if (headerIdx === -1) return []
+
+  const days = []
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const r = rows[i]
+    const dateVal = r?.[0]
+    if (!dateVal) break
+    const d = dateVal instanceof Date ? dateVal : new Date(dateVal)
+    if (isNaN(d)) break
+    const phase = norm(r?.[2])
+    const note = r?.[15] != null ? nfc(String(r[15]).trim()) : ''
+    days.push({ date: toISODate(d), phase: MP_PHASES.includes(phase) ? phase : 'Normal', note })
+  }
+  return days
+}
+
+/** Doc bang Phan bo theo Khung gio (sheet 03_PhanBo_TheoGio): ngan sach dai
+ * dien 1 ngay Big Sale + 2 khoi khung gio (Big Sale / Ngay thuong). */
+function parseHourlyPlan(wb) {
+  const fallback = { bigSaleRepBudget: 0, bigSale: [], normal: [] }
+  const sheet = wb.Sheets['03_PhanBo_TheoGio']
+  if (!sheet) return fallback
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null })
+  const norm = (v) => nfc(String(v ?? '').trim())
+  const lower = (v) => norm(v).toLowerCase()
+
+  let bigSaleRepBudget = 0
+  const repIdx = rows.findIndex((r) => lower(r?.[0]).includes('ngân sách đại diện') && lower(r?.[0]).includes('big sale'))
+  if (repIdx !== -1) bigSaleRepBudget = toFloatOrZero(rows[repIdx][1])
+
+  function readSlotBlock(fromIdx) {
+    const headerIdx = rows.findIndex((r, i) => i >= fromIdx && norm(r?.[0]) === 'Khung giờ')
+    if (headerIdx === -1) return { slots: [], nextIdx: rows.length }
+    const slots = []
+    let i = headerIdx + 1
+    for (; i < rows.length; i++) {
+      const label = norm(rows[i]?.[0])
+      if (!label || label.toUpperCase() === 'TỔNG') { i++; break }
+      slots.push({
+        label,
+        pct: toFloatOrZero(rows[i][1]),
+        channel: rows[i][3] != null ? nfc(String(rows[i][3]).trim()) : '',
+        bid: rows[i][6] != null ? nfc(String(rows[i][6]).trim()) : '',
+        action: rows[i][7] != null ? nfc(String(rows[i][7]).trim()) : '',
+        reason: rows[i][8] != null ? nfc(String(rows[i][8]).trim()) : ''
+      })
+    }
+    return { slots, nextIdx: i }
+  }
+
+  const blockA = readSlotBlock(0)
+  const blockB = readSlotBlock(blockA.nextIdx)
+  return { bigSaleRepBudget, bigSale: blockA.slots, normal: blockB.slots }
+}
+
+/** Doc file Media Plan: lay Thang/Nam tu TEN FILE, cong thuc dau vao tu
+ * Z1_GiaDinh_ThamSo, du lieu 31 ngay tu 02_PhanBo_31Ngay, khung gio tu
+ * 03_PhanBo_TheoGio. Ket qua tra ve la du lieu SAN SANG DE SUA truc tiep -
+ * moi cot ket qua (GMV/Don hang/ROAS...) duoc tinh boi computePlan(), khong
+ * doc san tu file. */
 async function parseMediaPlanFile(file) {
   const m = file.name.match(/Thang[_\s]?(\d{1,2})[_\s]?(\d{4})/i)
   if (!m) throw new Error('Không nhận diện được Tháng/Năm từ tên file. Đặt tên file dạng "MediaPlan_ThangX_20XX.xlsx" (vd MediaPlan_Thang7_2026.xlsx).')
@@ -1382,65 +1686,13 @@ async function parseMediaPlanFile(file) {
   const buffer = await file.arrayBuffer()
   const wb = XLSX.read(buffer, { type: 'array', cellDates: true })
 
-  const dashSheet = wb.Sheets['01_Dashboard']
-  if (!dashSheet) throw new Error('Không tìm thấy sheet "01_Dashboard" trong file. Đảm bảo dùng đúng file mẫu Media Plan.')
-  const dashRows = XLSX.utils.sheet_to_json(dashSheet, { header: 1, raw: true, defval: null })
+  const { productNames, budgets } = parseDashboardBasics(wb)
+  const z1 = parseZ1Assumptions(wb, productNames)
+  z1.products.forEach((p, idx) => { p.budgetMonthly = budgets[idx] || 0 })
 
-  const headerIdx = dashRows.findIndex((r) => nfc(String(r?.[0] ?? '').trim()) === nfc('Chỉ số'))
-  if (headerIdx === -1) throw new Error('Không tìm thấy bảng "Chỉ số / Toàn Shop" trong sheet 01_Dashboard.')
-
-  const productNames = [
-    String(dashRows[headerIdx][2] ?? 'Sản phẩm 1').trim(),
-    String(dashRows[headerIdx][3] ?? 'Sản phẩm 2').trim()
-  ]
-  const metrics = { total_budget: 0, roas_target: 0, cpa_target: 0, cpc_target: 0, ctr_target: 0, cvr_target: 0, atc_rate_target: 0, gmv_target: 0, orders_target: 0, aov_assumption: 0 }
-  const productMetrics = [{ name: productNames[0] }, { name: productNames[1] }]
-  const PERCENT_KEYS = ['ctr_target', 'cvr_target', 'atc_rate_target'] // sheet luu dang phan so 0-1, quy doi ve %
-
-  for (let i = headerIdx + 1; i < dashRows.length; i++) {
-    const row = dashRows[i]
-    const label = nfc(String(row?.[0] ?? '').trim()).toLowerCase()
-    if (!label) break
-
-    let key = null
-    if (label.includes('ngân sách') && (label.includes('tổng') || label.includes('ads'))) key = 'total_budget'
-    else if (label.startsWith('roas')) key = 'roas_target'
-    else if (label.startsWith('cpa')) key = 'cpa_target'
-    else if (label.startsWith('cpc')) key = 'cpc_target'
-    else if (label.startsWith('ctr')) key = 'ctr_target'
-    else if (label.startsWith('cr ') || label.startsWith('cr(')) key = 'cvr_target'
-    else if (label.includes('add to cart')) key = 'atc_rate_target'
-    else if (label.includes('gmv')) key = 'gmv_target'
-    else if (label.includes('đơn hàng kỳ vọng')) key = 'orders_target'
-    else if (label.includes('aov')) key = 'aov_assumption'
-    if (!key) continue
-
-    const mult = PERCENT_KEYS.includes(key) ? 100 : 1
-    metrics[key] = toFloatOrZero(row[1]) * mult
-    productMetrics[0][key] = toFloatOrZero(row[2]) * mult
-    productMetrics[1][key] = toFloatOrZero(row[3]) * mult
-  }
-
-  const phaseHeaderIdx = dashRows.findIndex((r) => nfc(String(r?.[0] ?? '').trim()) === nfc('Giai đoạn'))
-  const phases = []
-  if (phaseHeaderIdx !== -1) {
-    for (let i = phaseHeaderIdx + 1; i < dashRows.length; i++) {
-      const row = dashRows[i]
-      const name = String(row?.[0] ?? '').trim()
-      if (!name || nfc(name).toUpperCase() === 'TỔNG') break
-      phases.push({
-        phase_name: name,
-        days: toIntOrZero(row[1]),
-        budget: toFloatOrZero(row[2]),
-        budget_pct: toFloatOrZero(row[3]) * 100,
-        gmv_target: toFloatOrZero(row[4]),
-        orders_target: toIntOrZero(row[5]),
-        roas_target: toFloatOrZero(row[6]),
-        role_note: row[7] ? String(row[7]).trim() : null,
-        sort_order: phases.length
-      })
-    }
-  }
+  const dailyPlan = parseDailyPlan(wb)
+  if (!dailyPlan.length) throw new Error('Không đọc được bảng phân bổ 31 ngày (sheet "02_PhanBo_31Ngay"). Đảm bảo dùng đúng file mẫu Media Plan.')
+  const hourlyPlan = parseHourlyPlan(wb)
 
   let planTitle = `Media Plan Tháng ${thang}/${nam}`
   const coverSheet = wb.Sheets['00_BiaTongQuan']
@@ -1449,7 +1701,8 @@ async function parseMediaPlanFile(file) {
     if (coverRows?.[0]?.[0]) planTitle = nfc(String(coverRows[0][0]).trim())
   }
 
-  return { thang, nam, periodStart, periodEnd, planTitle, ...metrics, productBreakdown: productMetrics, phases }
+  const assumptions = { phaseWeights: z1.phaseWeights, weekendMultiplier: z1.weekendMultiplier, phaseMultipliers: z1.phaseMultipliers, products: z1.products }
+  return { thang, nam, periodStart, periodEnd, planTitle, assumptions, dailyPlan, hourlyPlan }
 }
 
 async function handleMediaPlanFileSelected(file) {
@@ -1476,14 +1729,16 @@ function showMediaPlanStep(step) {
 }
 
 function renderMediaPlanReview(p) {
+  const plan = computePlan(p.assumptions, p.dailyPlan)
   const html = `
     <div class="rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">
       ✅ Đã đọc: <b>${escapeHtml(p.planTitle)}</b><br>
       Tháng/Năm: <b>${p.thang}/${p.nam}</b> (${p.periodStart} → ${p.periodEnd}) ·
-      Tổng ngân sách: <b>${formatVND(p.total_budget)}</b> ·
-      ROAS mục tiêu: <b>${p.roas_target.toFixed(2)}x</b> ·
-      ${p.phases.length} giai đoạn · ${p.productBreakdown.length} sản phẩm
+      Tổng ngân sách: <b>${formatVND(plan.monthTotal.budget)}</b> ·
+      ROAS kỳ vọng: <b>${plan.monthTotal.roas.toFixed(2)}x</b> ·
+      ${p.dailyPlan.length} ngày · ${p.assumptions.products.length} sản phẩm · ${p.hourlyPlan.bigSale.length + p.hourlyPlan.normal.length} khung giờ
     </div>
+    <p class="text-xs text-gray-400">Sau khi lưu, vào "Xem chi tiết" để chỉnh sửa trực tiếp mọi thông số (ngân sách, giai đoạn từng ngày, benchmark CPC/CTR/CR/ATC/AOV...) — các cột GMV/Đơn hàng/ROAS sẽ tự động tính lại và tự động lưu, không cần thao tác gì thêm.</p>
     <div class="flex gap-3">
       <button id="mp_confirmBtn" class="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white hover:bg-brand-600">Lưu Kế hoạch lên Supabase</button>
       <button id="mp_resetBtn" class="rounded-lg border px-4 py-2 text-sm border-gray-300 dark:border-gray-700">Chọn file khác</button>
@@ -1514,42 +1769,28 @@ async function handleMediaPlanConfirmSync() {
       .upload(storagePath, file, { upsert: true, contentType: file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
     if (uploadError) throw uploadError
 
-    document.getElementById('mp_syncing').innerHTML = progressBarHTML(70, 'Đang lưu dữ liệu tóm tắt...')
+    document.getElementById('mp_syncing').innerHTML = progressBarHTML(70, 'Đang lưu dữ liệu Kế hoạch...')
 
-    const { data: planRow, error: planError } = await sb.from('media_plans').upsert({
+    const summary = buildPlanSummaryFields(parsed.assumptions, parsed.dailyPlan)
+    const { error: planError } = await sb.from('media_plans').upsert({
       shop_name: shopName,
       thang: parsed.thang,
       nam: parsed.nam,
       plan_title: parsed.planTitle,
       period_start: parsed.periodStart,
       period_end: parsed.periodEnd,
-      total_budget: parsed.total_budget,
-      roas_target: parsed.roas_target,
-      cpa_target: parsed.cpa_target,
-      cpc_target: parsed.cpc_target,
-      ctr_target: parsed.ctr_target,
-      cvr_target: parsed.cvr_target,
-      atc_rate_target: parsed.atc_rate_target,
-      gmv_target: parsed.gmv_target,
-      orders_target: parsed.orders_target,
-      aov_assumption: parsed.aov_assumption,
-      product_breakdown: parsed.productBreakdown,
+      ...summary,
+      assumptions: parsed.assumptions,
+      daily_plan: parsed.dailyPlan,
+      hourly_plan: parsed.hourlyPlan,
       file_path: storagePath,
       file_name: file.name,
       uploaded_by: currentSession?.user?.id
     }, { onConflict: 'plan_key' }).select().single()
     if (planError) throw planError
 
-    // Xoa phases cu, ghi lai phases moi (tranh du thua khi upload lai)
-    await sb.from('media_plan_phases').delete().eq('plan_id', planRow.id)
-    if (parsed.phases.length) {
-      const phaseRows = parsed.phases.map((ph) => ({ ...ph, plan_id: planRow.id }))
-      const { error: phaseError } = await sb.from('media_plan_phases').insert(phaseRows)
-      if (phaseError) throw phaseError
-    }
-
     document.getElementById('mp_done').innerHTML = `
-      <div class="rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">✅ Đã lưu Kế hoạch tháng ${parsed.thang}/${parsed.nam} cho Shop "${escapeHtml(shopName)}".</div>
+      <div class="rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">✅ Đã lưu Kế hoạch tháng ${parsed.thang}/${parsed.nam} cho Shop "${escapeHtml(shopName)}". Vào "Xem chi tiết" bên dưới để chỉnh sửa trực tiếp.</div>
       <button id="mp_afterDoneBtn" class="w-fit rounded-lg border px-4 py-2 text-sm border-gray-300 dark:border-gray-700">Upload kế hoạch khác</button>`
     document.getElementById('mp_afterDoneBtn').addEventListener('click', resetMediaPlanUpload)
     showMediaPlanStep('done')
@@ -1605,8 +1846,6 @@ async function showMediaPlanDetail(planId) {
   try {
     const { data: plan, error: planErr } = await sb.from('media_plans').select('*').eq('id', planId).single()
     if (planErr) throw planErr
-    const { data: phases, error: phaseErr } = await sb.from('media_plan_phases').select('*').eq('plan_id', planId).order('sort_order')
-    if (phaseErr) throw phaseErr
 
     // Doi chieu Ke hoach vs Thuc te: lay du lieu that cung Shop/Thang/Nam
     const { data: actualRows, error: actualErr } = await sb.from('v_ads_computed').select('*')
@@ -1619,57 +1858,331 @@ async function showMediaPlanDetail(planId) {
       fileUrl = signedData?.signedUrl || null
     }
 
-    renderMediaPlanDetail(plan, phases || [], actualKpi, fileUrl)
+    // Ke hoach luu tu ban CU (truoc khi co tinh nang Editable) chua co
+    // assumptions/daily_plan -> khong the tinh lai/sua truc tiep duoc.
+    if (!plan.assumptions || !plan.daily_plan) {
+      detailEl.innerHTML = `<div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+        <p class="text-sm text-amber-600">⚠️ Kế hoạch này được lưu từ phiên bản cũ (chưa có dữ liệu chi tiết theo ngày/giờ). Hãy Upload lại đúng file Media Plan gốc ở mục phía trên (cùng tên file, cùng Shop) để nâng cấp lên bản xem/sửa chi tiết.</p>
+        ${fileUrl ? `<a href="${fileUrl}" target="_blank" class="mt-3 inline-block rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600">⬇️ Tải file gốc</a>` : ''}
+      </div>`
+      return
+    }
+
+    mpEdit = {
+      plan, fileUrl, actualKpi,
+      assumptions: JSON.parse(JSON.stringify(plan.assumptions)),
+      dailyPlan: JSON.parse(JSON.stringify(plan.daily_plan)),
+      hourlyPlan: JSON.parse(JSON.stringify(plan.hourly_plan || { bigSaleRepBudget: 0, bigSale: [], normal: [] })),
+      saveTimer: null,
+      saveStatus: 'idle', // idle | dirty | saving | saved | error
+      lastSavedAt: null,
+      saveError: null
+    }
+    renderMediaPlanDetail()
   } catch (err) {
     detailEl.innerHTML = `<div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800"><p class="text-sm text-red-500">Lỗi tải chi tiết: ${escapeHtml(err.message)}</p></div>`
   }
 }
 
-function renderMediaPlanDetail(plan, phases, actualKpi, fileUrl) {
+/* ---- Cac ham sinh HTML cho tung khoi editable/computed cua trang chi tiet ---- */
+function mpProductCardHTML(p, idx) {
+  return `<div class="rounded-lg border border-gray-200 dark:border-gray-800 p-3">
+    <p class="text-sm font-semibold mb-2">${escapeHtml(p.name)}</p>
+    <div class="grid grid-cols-2 gap-2 text-xs">
+      <label class="flex flex-col gap-1">Ngân sách tháng (đ)
+        <input type="number" step="1000" data-mp="product-budget" data-idx="${idx}" value="${p.budgetMonthly || 0}" class="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></label>
+      <label class="flex flex-col gap-1">AOV giả định (đ)
+        <input type="number" step="1000" data-mp="product-rate" data-idx="${idx}" data-key="aov" value="${p.aov || 0}" class="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></label>
+      <label class="flex flex-col gap-1">CPC gốc - Normal (đ)
+        <input type="number" step="10" data-mp="product-rate" data-idx="${idx}" data-key="cpc" value="${p.cpc || 0}" class="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></label>
+      <label class="flex flex-col gap-1">CTR gốc - Normal (%)
+        <input type="number" step="0.1" data-mp="product-rate" data-idx="${idx}" data-key="ctr" value="${((p.ctr || 0) * 100).toFixed(3)}" class="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></label>
+      <label class="flex flex-col gap-1">CR gốc - Normal (%)
+        <input type="number" step="0.1" data-mp="product-rate" data-idx="${idx}" data-key="cr" value="${((p.cr || 0) * 100).toFixed(3)}" class="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></label>
+      <label class="flex flex-col gap-1">ATC Rate gốc (%)
+        <input type="number" step="0.1" data-mp="product-rate" data-idx="${idx}" data-key="atc" value="${((p.atc || 0) * 100).toFixed(3)}" class="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></label>
+    </div>
+  </div>`
+}
+
+function mpPhaseWeightsHTML(assumptions) {
+  return `<div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
+    ${MP_PHASES.map((ph) => `<label class="flex flex-col gap-1 text-xs">Trọng số "${ph}"
+      <input type="number" step="0.1" data-mp="phase-weight" data-phase="${ph}" value="${assumptions.phaseWeights[ph] ?? 1}" class="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></label>`).join('')}
+    <label class="flex flex-col gap-1 text-xs">Hệ số Cuối tuần (T7/CN)
+      <input type="number" step="0.01" data-mp="weekend-mult" value="${assumptions.weekendMultiplier ?? 1}" class="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></label>
+  </div>`
+}
+
+function mpPhaseMultHTML(assumptions) {
+  return `<details class="mt-3">
+    <summary class="cursor-pointer text-xs font-medium text-gray-500">⚙️ Nâng cao — Hệ số nhân theo Giai đoạn (áp lên benchmark gốc ở trên)</summary>
+    <table class="mt-2 w-full text-left text-xs">
+      <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+        <th class="py-1 pr-2 font-medium text-gray-400">Giai đoạn</th>
+        <th class="py-1 pr-2 font-medium text-gray-400">Hệ số CPC</th>
+        <th class="py-1 pr-2 font-medium text-gray-400">Hệ số CTR</th>
+        <th class="py-1 pr-2 font-medium text-gray-400">Hệ số CR</th>
+        <th class="py-1 pr-2 font-medium text-gray-400">Hệ số ATC</th>
+      </tr></thead>
+      <tbody>${MP_PHASES.map((ph) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+        <td class="py-1 pr-2">${ph}</td>
+        ${['cpc', 'ctr', 'cr', 'atc'].map((k) => `<td class="py-1 pr-2"><input type="number" step="0.01" data-mp="phase-mult" data-phase="${ph}" data-key="${k}" value="${assumptions.phaseMultipliers[ph][k]}" class="w-20 rounded border px-1.5 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></td>`).join('')}
+      </tr>`).join('')}</tbody>
+    </table>
+  </details>`
+}
+
+function mpKpiCardsHTML(monthTotal) {
   const items = [
-    { label: 'Tổng ngân sách', value: formatVND(plan.total_budget) },
-    { label: 'ROAS mục tiêu', value: Number(plan.roas_target).toFixed(2) + 'x' },
-    { label: 'CPA mục tiêu', value: formatVND(plan.cpa_target) },
-    { label: 'CPC mục tiêu', value: formatVND(plan.cpc_target) },
-    { label: 'CTR mục tiêu', value: formatPercent(plan.ctr_target) },
-    { label: 'CVR mục tiêu', value: formatPercent(plan.cvr_target) },
-    { label: 'Add To Cart Rate', value: formatPercent(plan.atc_rate_target) },
-    { label: 'GMV kỳ vọng', value: formatVND(plan.gmv_target) },
-    { label: 'Đơn hàng kỳ vọng', value: formatNumber(plan.orders_target) },
-    { label: 'AOV giả định', value: formatVND(plan.aov_assumption) }
+    { label: 'Tổng ngân sách', value: formatVND(monthTotal.budget) },
+    { label: 'GMV kỳ vọng', value: formatVND(monthTotal.gmv) },
+    { label: 'Đơn hàng kỳ vọng', value: formatNumber(monthTotal.order) },
+    { label: 'ROAS kỳ vọng', value: monthTotal.roas.toFixed(2) + 'x' },
+    { label: 'CPC bình quân', value: formatVND(monthTotal.cpc) },
+    { label: 'CTR bình quân', value: formatPercent(monthTotal.ctr * 100) },
+    { label: 'CR bình quân', value: formatPercent(monthTotal.cr * 100) },
+    { label: 'CPA bình quân', value: formatVND(monthTotal.cpa) }
   ]
+  return `<div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+    ${items.map((i) => `<div class="rounded-lg border border-gray-200 dark:border-gray-800 p-3">
+      <p class="text-xs text-gray-400">${i.label}</p>
+      <p class="mt-1 text-base font-bold">${i.value}</p>
+    </div>`).join('')}
+  </div>`
+}
 
-  const productRows = (plan.product_breakdown || []).map((pr) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
-    <td class="py-2 pr-3">${escapeHtml(pr.name)}</td>
-    <td class="py-2 pr-3">${formatVND(pr.total_budget)}</td>
-    <td class="py-2 pr-3">${(pr.roas_target || 0).toFixed(2)}x</td>
-    <td class="py-2 pr-3">${formatVND(pr.cpa_target)}</td>
-    <td class="py-2 pr-3">${formatVND(pr.gmv_target)}</td>
-    <td class="py-2 pr-3">${formatNumber(pr.orders_target)}</td>
+function mpProductBreakdownTableHTML(perProductTotal) {
+  return `<table class="w-full text-left text-sm">
+    <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+      <th class="py-2 pr-3 font-medium text-gray-400">Sản phẩm</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Ngân sách</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">GMV kỳ vọng</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Đơn kỳ vọng</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">ROAS</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">CPA</th>
+    </tr></thead>
+    <tbody>${perProductTotal.map((p) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+      <td class="py-2 pr-3">${escapeHtml(p.name)}</td>
+      <td class="py-2 pr-3">${formatVND(p.budget)}</td>
+      <td class="py-2 pr-3">${formatVND(p.gmv)}</td>
+      <td class="py-2 pr-3">${formatNumber(p.order)}</td>
+      <td class="py-2 pr-3">${p.roas.toFixed(2)}x</td>
+      <td class="py-2 pr-3">${formatVND(p.cpa)}</td>
+    </tr>`).join('')}</tbody>
+  </table>`
+}
+
+function mpPhaseSummaryTableHTML(phaseSummary) {
+  return `<table class="w-full text-left text-sm">
+    <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+      <th class="py-2 pr-3 font-medium text-gray-400">Giai đoạn</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Số ngày</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Ngân sách</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">% Ngân sách</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">GMV kỳ vọng</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Đơn kỳ vọng</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">ROAS kỳ vọng</th>
+    </tr></thead>
+    <tbody>${phaseSummary.map((g) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+      <td class="py-2 pr-3">${g.phase}</td>
+      <td class="py-2 pr-3">${g.days}</td>
+      <td class="py-2 pr-3">${formatVND(g.budget)}</td>
+      <td class="py-2 pr-3">${g.budgetPct.toFixed(1)}%</td>
+      <td class="py-2 pr-3">${formatVND(g.gmv)}</td>
+      <td class="py-2 pr-3">${formatNumber(g.order)}</td>
+      <td class="py-2 pr-3">${g.roas.toFixed(2)}x</td>
+    </tr>`).join('')}</tbody>
+  </table>`
+}
+
+function mpDailyTableHTML(planResult) {
+  const productCols = (planResult.rows[0]?.perProduct || []).map((p) => `<th class="py-2 pr-2 font-medium text-gray-400 whitespace-nowrap">NS ${escapeHtml(p.name.split(' ')[0])}</th>`).join('')
+
+  const rows = planResult.rows.map((r, idx) => {
+    const [y, mo, da] = r.date.split('-')
+    const dow = new Date(r.date + 'T00:00:00').toLocaleDateString('vi-VN', { weekday: 'short' })
+    const dayType = r.phase === 'Sale' ? 'Sale Lớn' : (r.isWeekend ? 'Cuối tuần' : 'Ngày thường')
+    return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0 ${MP_PHASE_BADGE[r.phase] || ''}">
+      <td class="py-1.5 pr-2 whitespace-nowrap">${da}/${mo} <span class="text-gray-400">(${dow})</span></td>
+      <td class="py-1.5 pr-2">
+        <select data-mp="day-phase" data-idx="${idx}" class="rounded border px-1.5 py-1 text-xs border-gray-300 dark:border-gray-700 dark:bg-gray-800">
+          ${MP_PHASES.map((ph) => `<option value="${ph}" ${ph === r.phase ? 'selected' : ''}>${ph}</option>`).join('')}
+        </select>
+      </td>
+      <td class="py-1.5 pr-2 text-gray-400 whitespace-nowrap">${dayType}</td>
+      <td class="py-1.5 pr-2">${r.weight.toFixed(2)}</td>
+      ${r.perProduct.map((pp) => `<td class="py-1.5 pr-2 whitespace-nowrap">${formatVND(pp.budget)}</td>`).join('')}
+      <td class="py-1.5 pr-2 font-medium whitespace-nowrap">${formatVND(r.totalBudget)}</td>
+      <td class="py-1.5 pr-2 whitespace-nowrap">${r.roas.toFixed(2)}x</td>
+      <td class="py-1.5 pr-2 whitespace-nowrap">${formatVND(r.blendedCpc)}</td>
+      <td class="py-1.5 pr-2 whitespace-nowrap">${formatPercent(r.blendedCtr * 100)}</td>
+      <td class="py-1.5 pr-2 whitespace-nowrap">${formatPercent(r.blendedCr * 100)}</td>
+      <td class="py-1.5 pr-2 whitespace-nowrap">${formatVND(r.totalGMV)}</td>
+      <td class="py-1.5 pr-2 whitespace-nowrap">${formatNumber(r.totalOrder)}</td>
+      <td class="py-1.5 pr-2 min-w-[220px]">
+        <input type="text" data-mp="day-note" data-idx="${idx}" value="${escapeHtml(r.note || '')}" class="w-full rounded border px-1.5 py-1 text-xs border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></td>
+    </tr>`
+  }).join('')
+
+  return `<div class="overflow-x-auto"><table class="w-full text-left text-xs">
+    <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+      <th class="py-2 pr-2 font-medium text-gray-400">Ngày</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">Giai đoạn</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">Loại ngày</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">Trọng số</th>
+      ${productCols}
+      <th class="py-2 pr-2 font-medium text-gray-400">Tổng NS</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">ROAS</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">CPC</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">CTR</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">CR</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">GMV kỳ vọng</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">Đơn kỳ vọng</th>
+      <th class="py-2 pr-2 font-medium text-gray-400 min-w-[220px]">Ghi chú chiến lược</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`
+}
+
+function mpHourlyTableHTML(groupKey, groupLabel, hourlyResult, repBudgetEditable) {
+  const g = hourlyResult[groupKey]
+  const pctTotalPct = g.pctTotal * 100
+  const warnOk = Math.abs(pctTotalPct - 100) <= 0.5
+  const rows = g.slots.map((s, idx) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0 align-top">
+    <td class="py-1.5 pr-2 whitespace-nowrap font-medium">${escapeHtml(s.label)}</td>
+    <td class="py-1.5 pr-2 whitespace-nowrap"><input type="number" step="0.1" data-mp="hourly-slot" data-group="${groupKey}" data-idx="${idx}" data-key="pct" value="${(s.pct * 100).toFixed(1)}" class="w-20 rounded border px-1.5 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" />%</td>
+    <td class="py-1.5 pr-2 whitespace-nowrap">${formatVND(s.budget)}</td>
+    <td class="py-1.5 pr-2 min-w-[160px]"><input type="text" data-mp="hourly-slot" data-group="${groupKey}" data-idx="${idx}" data-key="channel" value="${escapeHtml(s.channel || '')}" class="w-full rounded border px-1.5 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></td>
+    <td class="py-1.5 pr-2 min-w-[110px]"><input type="text" data-mp="hourly-slot" data-group="${groupKey}" data-idx="${idx}" data-key="bid" value="${escapeHtml(s.bid || '')}" class="w-full rounded border px-1.5 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></td>
+    <td class="py-1.5 pr-2 min-w-[220px]"><textarea rows="2" data-mp="hourly-slot" data-group="${groupKey}" data-idx="${idx}" data-key="action" class="w-full rounded border px-1.5 py-1 text-xs border-gray-300 dark:border-gray-700 dark:bg-gray-800">${escapeHtml(s.action || '')}</textarea></td>
+    <td class="py-1.5 pr-2 min-w-[220px]"><textarea rows="2" data-mp="hourly-slot" data-group="${groupKey}" data-idx="${idx}" data-key="reason" class="w-full rounded border px-1.5 py-1 text-xs border-gray-300 dark:border-gray-700 dark:bg-gray-800">${escapeHtml(s.reason || '')}</textarea></td>
   </tr>`).join('')
 
-  const phaseRows = phases.map((ph) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
-    <td class="py-2 pr-3">${escapeHtml(ph.phase_name)}</td>
-    <td class="py-2 pr-3">${ph.days}</td>
-    <td class="py-2 pr-3">${formatVND(ph.budget)}</td>
-    <td class="py-2 pr-3">${Number(ph.budget_pct).toFixed(1)}%</td>
-    <td class="py-2 pr-3">${formatVND(ph.gmv_target)}</td>
-    <td class="py-2 pr-3">${formatNumber(ph.orders_target)}</td>
-    <td class="py-2 pr-3">${Number(ph.roas_target).toFixed(2)}x</td>
-    <td class="py-2 pr-3 text-xs text-gray-500">${escapeHtml(ph.role_note || '')}</td>
-  </tr>`).join('')
+  return `<div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <h4 class="text-sm font-semibold">${groupLabel}</h4>
+      <p class="text-xs">Ngân sách đại diện/ngày:
+        ${repBudgetEditable
+          ? `<input type="number" step="1000" data-mp="hourly-rep-budget" value="${g.repBudget}" class="w-32 rounded border px-1.5 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" />`
+          : `<b>${formatVND(g.repBudget)}</b> <span class="text-gray-400">(tự động = TB các ngày Normal)</span>`}
+        · Tổng tỷ lệ: <b class="${warnOk ? 'text-green-600' : 'text-red-600'}">${pctTotalPct.toFixed(1)}%</b>${warnOk ? ' ✓' : ' ⚠️ nên = 100%'}
+      </p>
+    </div>
+    <div class="overflow-x-auto"><table class="w-full text-left text-xs">
+      <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+        <th class="py-2 pr-2 font-medium text-gray-400">Khung giờ</th>
+        <th class="py-2 pr-2 font-medium text-gray-400">Tỷ lệ NS</th>
+        <th class="py-2 pr-2 font-medium text-gray-400">Ngân sách</th>
+        <th class="py-2 pr-2 font-medium text-gray-400">Kênh ưu tiên</th>
+        <th class="py-2 pr-2 font-medium text-gray-400">Giá bid</th>
+        <th class="py-2 pr-2 font-medium text-gray-400">Hành động</th>
+        <th class="py-2 pr-2 font-medium text-gray-400">Lý do</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`
+}
+
+/* ---- Xu ly khi nguoi dung sua bat ky o input/select/textarea nao (event
+   delegation, gan 1 lan duy nhat tren #mp_detail luc initMediaPlanPage) ---- */
+function handleMpFieldChange(e) {
+  const el = e.target.closest('[data-mp]')
+  if (!el || !mpEdit) return
+  const kind = el.dataset.mp
+  const val = el.value
+
+  if (kind === 'product-budget') {
+    mpEdit.assumptions.products[+el.dataset.idx].budgetMonthly = toFloatOrZero(val)
+  } else if (kind === 'product-rate') {
+    const key = el.dataset.key
+    const num = toFloatOrZero(val)
+    mpEdit.assumptions.products[+el.dataset.idx][key] = ['ctr', 'cr', 'atc'].includes(key) ? num / 100 : num
+  } else if (kind === 'phase-weight') {
+    mpEdit.assumptions.phaseWeights[el.dataset.phase] = toFloatOrZero(val)
+  } else if (kind === 'weekend-mult') {
+    mpEdit.assumptions.weekendMultiplier = toFloatOrZero(val)
+  } else if (kind === 'phase-mult') {
+    mpEdit.assumptions.phaseMultipliers[el.dataset.phase][el.dataset.key] = toFloatOrZero(val)
+  } else if (kind === 'day-phase') {
+    mpEdit.dailyPlan[+el.dataset.idx].phase = val
+  } else if (kind === 'day-note') {
+    mpEdit.dailyPlan[+el.dataset.idx].note = val
+  } else if (kind === 'hourly-rep-budget') {
+    mpEdit.hourlyPlan.bigSaleRepBudget = toFloatOrZero(val)
+  } else if (kind === 'hourly-slot') {
+    const group = el.dataset.group, idx = +el.dataset.idx, key = el.dataset.key
+    const slot = mpEdit.hourlyPlan[group][idx]
+    slot[key] = key === 'pct' ? toFloatOrZero(val) / 100 : val
+  } else {
+    return
+  }
+
+  scheduleMpAutosave()
+  renderMediaPlanDetail(true)
+}
+
+function scheduleMpAutosave() {
+  if (!mpEdit) return
+  mpEdit.saveStatus = 'dirty'
+  clearTimeout(mpEdit.saveTimer)
+  mpEdit.saveTimer = setTimeout(saveMpNow, 900)
+}
+
+async function saveMpNow() {
+  if (!mpEdit) return
+  mpEdit.saveStatus = 'saving'
+  updateMpSaveStatusBadge()
+  try {
+    const summary = buildPlanSummaryFields(mpEdit.assumptions, mpEdit.dailyPlan)
+    const { error } = await sb.from('media_plans').update({
+      assumptions: mpEdit.assumptions,
+      daily_plan: mpEdit.dailyPlan,
+      hourly_plan: mpEdit.hourlyPlan,
+      ...summary
+    }).eq('id', mpEdit.plan.id)
+    if (error) throw error
+    mpEdit.saveStatus = 'saved'
+    mpEdit.lastSavedAt = new Date()
+  } catch (err) {
+    mpEdit.saveStatus = 'error'
+    mpEdit.saveError = err.message
+  }
+  updateMpSaveStatusBadge()
+}
+
+function updateMpSaveStatusBadge() {
+  const el = document.getElementById('mp_saveStatus')
+  if (!el || !mpEdit) return
+  const MAP = {
+    idle: '<span class="text-gray-400">Chưa có thay đổi</span>',
+    dirty: '<span class="text-gray-400">● Có thay đổi chưa lưu...</span>',
+    saving: '<span class="text-blue-500">⏳ Đang lưu...</span>',
+    saved: `<span class="text-green-600">✅ Đã lưu lúc ${mpEdit.lastSavedAt ? mpEdit.lastSavedAt.toLocaleTimeString('vi-VN') : ''}</span>`,
+    error: `<span class="text-red-600">⚠️ Lỗi lưu: ${escapeHtml(mpEdit.saveError || '')} <button id="mp_retrySaveBtn" class="underline">Thử lại</button></span>`
+  }
+  el.innerHTML = MAP[mpEdit.saveStatus] || ''
+  document.getElementById('mp_retrySaveBtn')?.addEventListener('click', saveMpNow)
+}
+
+function renderMediaPlanDetail(preserveScroll) {
+  if (!mpEdit) return
+  const main = document.querySelector('main')
+  const scrollTop = preserveScroll && main ? main.scrollTop : null
+
+  const { plan, fileUrl, actualKpi, assumptions, dailyPlan, hourlyPlan } = mpEdit
+  const planResult = computePlan(assumptions, dailyPlan)
+  const hourlyResult = computeHourly(assumptions, planResult, hourlyPlan)
 
   let comparisonHtml = '<p class="text-sm text-gray-400">Chưa có dữ liệu thực tế (từ Upload dữ liệu) cho Shop/Tháng này để đối chiếu.</p>'
   if (actualKpi && (actualKpi.revenue > 0 || actualKpi.cost > 0)) {
     const rows = [
-      { label: 'GMV / Doanh thu', target: plan.gmv_target, actual: actualKpi.revenue, fmt: formatVND },
-      { label: 'Chi phí Ads', target: plan.total_budget, actual: actualKpi.cost, fmt: formatVND },
-      { label: 'ROAS', target: plan.roas_target, actual: actualKpi.roas, fmt: (v) => v.toFixed(2) + 'x' },
-      { label: 'CPA', target: plan.cpa_target, actual: actualKpi.cpa, fmt: formatVND },
-      { label: 'CPC', target: plan.cpc_target, actual: actualKpi.cpc, fmt: formatVND },
-      { label: 'CTR', target: plan.ctr_target, actual: actualKpi.ctr, fmt: formatPercent },
-      { label: 'CVR', target: plan.cvr_target, actual: actualKpi.cvr, fmt: formatPercent },
-      { label: 'Đơn hàng', target: plan.orders_target, actual: actualKpi.orders, fmt: formatNumber }
+      { label: 'GMV / Doanh thu', target: planResult.monthTotal.gmv, actual: actualKpi.revenue, fmt: formatVND },
+      { label: 'Chi phí Ads', target: planResult.monthTotal.budget, actual: actualKpi.cost, fmt: formatVND },
+      { label: 'ROAS', target: planResult.monthTotal.roas, actual: actualKpi.roas, fmt: (v) => v.toFixed(2) + 'x' },
+      { label: 'CPA', target: planResult.monthTotal.cpa, actual: actualKpi.cpa, fmt: formatVND },
+      { label: 'CPC', target: planResult.monthTotal.cpc, actual: actualKpi.cpc, fmt: formatVND },
+      { label: 'CTR', target: planResult.monthTotal.ctr * 100, actual: actualKpi.ctr, fmt: formatPercent },
+      { label: 'CR', target: planResult.monthTotal.cr * 100, actual: actualKpi.cvr, fmt: formatPercent },
+      { label: 'Đơn hàng', target: planResult.monthTotal.order, actual: actualKpi.orders, fmt: formatNumber }
     ]
     comparisonHtml = `<table class="w-full text-left text-sm">
       <thead><tr class="border-b border-gray-200 dark:border-gray-800">
@@ -1693,58 +2206,64 @@ function renderMediaPlanDetail(plan, phases, actualKpi, fileUrl) {
 
   document.getElementById('mp_detail').innerHTML = `
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
-      <div class="flex items-start justify-between gap-4 mb-1">
+      <div class="flex flex-wrap items-start justify-between gap-4 mb-1">
         <div>
           <h3 class="text-sm font-semibold">${escapeHtml(plan.plan_title)}</h3>
           <p class="text-xs text-gray-400">Shop: ${escapeHtml(plan.shop_name)} · Tháng ${plan.thang}/${plan.nam} (${plan.period_start} → ${plan.period_end})</p>
         </div>
-        ${fileUrl ? `<a href="${fileUrl}" target="_blank" class="shrink-0 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600">⬇️ Tải file gốc (đầy đủ 14 sheet)</a>` : ''}
+        <div class="flex items-center gap-3">
+          <span id="mp_saveStatus" class="text-xs"></span>
+          ${fileUrl ? `<a href="${fileUrl}" target="_blank" class="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium border-gray-300 dark:border-gray-700">⬇️ File gốc</a>` : ''}
+        </div>
       </div>
-      <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 mt-4">
-        ${items.map((i) => `<div class="rounded-lg border border-gray-200 dark:border-gray-800 p-3">
-          <p class="text-xs text-gray-400">${i.label}</p>
-          <p class="mt-1 text-base font-bold">${i.value}</p>
-        </div>`).join('')}
-      </div>
+      <p class="text-xs text-gray-400 mt-2">Mọi số liệu bên dưới đều <b>chỉnh sửa trực tiếp</b> được — sửa xong bấm Tab/click ra ngoài ô, các cột GMV/Đơn hàng/ROAS... sẽ <b>tự động tính lại</b> và <b>tự động lưu</b> (không cần bấm nút Lưu).</p>
     </div>
 
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
-      <h3 class="text-sm font-semibold mb-3">Mục tiêu theo Sản phẩm</h3>
-      <div class="overflow-x-auto"><table class="w-full text-left text-sm">
-        <thead><tr class="border-b border-gray-200 dark:border-gray-800">
-          <th class="py-2 pr-3 font-medium text-gray-400">Sản phẩm</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">Ngân sách</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">ROAS mục tiêu</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">CPA mục tiêu</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">GMV kỳ vọng</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">Đơn kỳ vọng</th>
-        </tr></thead>
-        <tbody>${productRows}</tbody>
-      </table></div>
+      <h3 class="text-sm font-semibold mb-3">Giả định & Ngân sách (chỉnh sửa được)</h3>
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 mb-4">
+        ${assumptions.products.map((p, idx) => mpProductCardHTML(p, idx)).join('')}
+      </div>
+      ${mpPhaseWeightsHTML(assumptions)}
+      ${mpPhaseMultHTML(assumptions)}
     </div>
 
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
-      <h3 class="text-sm font-semibold mb-3">Phân bổ Ngân sách theo Giai đoạn</h3>
-      <div class="overflow-x-auto"><table class="w-full text-left text-sm">
-        <thead><tr class="border-b border-gray-200 dark:border-gray-800">
-          <th class="py-2 pr-3 font-medium text-gray-400">Giai đoạn</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">Số ngày</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">Ngân sách</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">% Ngân sách</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">GMV kỳ vọng</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">Đơn kỳ vọng</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">ROAS kỳ vọng</th>
-          <th class="py-2 pr-3 font-medium text-gray-400">Vai trò</th>
-        </tr></thead>
-        <tbody>${phaseRows}</tbody>
-      </table></div>
+      <h3 class="text-sm font-semibold mb-3">Tổng quan Kế hoạch (tự động tính)</h3>
+      ${mpKpiCardsHTML(planResult.monthTotal)}
+    </div>
+
+    <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <h3 class="text-sm font-semibold mb-3">Mục tiêu theo Sản phẩm (tự động tính)</h3>
+      <div class="overflow-x-auto">${mpProductBreakdownTableHTML(planResult.perProductTotal)}</div>
+    </div>
+
+    <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <h3 class="text-sm font-semibold mb-3">Phân bổ Ngân sách theo Giai đoạn (tự động tính từ bảng 31 ngày)</h3>
+      <div class="overflow-x-auto">${mpPhaseSummaryTableHTML(planResult.phaseSummary)}</div>
+    </div>
+
+    <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <h3 class="text-sm font-semibold mb-1">Phân bổ Ngân sách 31 ngày (chỉnh sửa được)</h3>
+      <p class="text-xs text-gray-400 mb-3">Đổi <b>Giai đoạn</b> mỗi ngày (Sale/Pre-heat/Sustain/Normal) để dời lịch Big Sale, hoặc sửa <b>Ghi chú chiến lược</b>. Ngân sách/GMV/Đơn hàng/ROAS mỗi ngày tự tính theo Trọng số giai đoạn ở trên.</p>
+      ${mpDailyTableHTML(planResult)}
+    </div>
+
+    <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <h3 class="text-sm font-semibold mb-1">Phân bổ Ngân sách theo Khung giờ (chỉnh sửa được)</h3>
+      <p class="text-xs text-gray-400 mb-4">Áp dụng cho 1 ngày đại diện — dùng để phân bổ bid/ngân sách trong ngày Big Sale và ngày thường.</p>
+      <div class="mb-6">${mpHourlyTableHTML('bigSale', '🔥 Ngày Big Sale', hourlyResult, true)}</div>
+      <div>${mpHourlyTableHTML('normal', '📅 Ngày thường (Normal)', hourlyResult, false)}</div>
     </div>
 
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
       <h3 class="text-sm font-semibold mb-1">Kế hoạch vs Thực tế</h3>
-      <p class="text-xs text-gray-400 mb-3">Đối chiếu mục tiêu với số liệu thực tế đã Upload cho cùng Shop/Tháng</p>
+      <p class="text-xs text-gray-400 mb-3">Đối chiếu mục tiêu (tính theo giả định hiện tại) với số liệu thực tế đã Upload cho cùng Shop/Tháng</p>
       <div class="overflow-x-auto">${comparisonHtml}</div>
     </div>`
+
+  updateMpSaveStatusBadge()
+  if (scrollTop !== null && main) requestAnimationFrame(() => { main.scrollTop = scrollTop })
 }
 
 /* -----------------------------------------------------------------------
