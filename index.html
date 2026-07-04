@@ -1359,21 +1359,42 @@ function computePlan(assumptions, dailyPlan) {
   const totalWeight = days.reduce((s, d) => s + d.weight, 0)
   const unitPerWeight = products.map((p) => (totalWeight > 0 ? p.budgetMonthly / totalWeight : 0))
 
-  const rows = days.map((d) => {
+  // Buoc 1: tinh Ngan sach/ngay x san pham, LAM TRON ve hang nghin (dung
+  // cong thuc ROUND cua file goc) - lam tron tung ngay nhu the nay ve ban
+  // chat se khien TONG CA THANG bi le vai nghin dong so voi Ngan sach da
+  // nhap (vd 30.000.000 -> 30.007.000).
+  const perDayProduct = days.map((d) => {
     const mult = assumptions.phaseMultipliers[d.phase] || { cpc: 1, ctr: 1, cr: 1, atc: 1 }
-    const perProduct = products.map((p, idx) => {
-      const budget = Math.round((d.weight * unitPerWeight[idx]) / 1000) * 1000
-      const cpc = p.cpc * mult.cpc
-      const ctr = p.ctr * mult.ctr
-      const cr = p.cr * mult.cr
-      const atc = p.atc * mult.atc
-      const aov = p.aov
-      const click = cpc > 0 ? budget / cpc : 0
-      const impr = ctr > 0 ? click / ctr : 0
-      const order = click * cr
-      const gmv = order * aov
-      const cpa = order > 0 ? budget / order : 0
-      return { name: p.name, budget, cpc, ctr, cr, atc, aov, click, impr, order, gmv, cpa }
+    return products.map((p, idx) => ({
+      name: p.name,
+      budget: Math.round((d.weight * unitPerWeight[idx]) / 1000) * 1000,
+      cpc: p.cpc * mult.cpc, ctr: p.ctr * mult.ctr, cr: p.cr * mult.cr, atc: p.atc * mult.atc, aov: p.aov
+    }))
+  })
+
+  // Buoc 2: HIEU CHINH LAM TRON - cong phan chenh lech (Ngan sach thang da
+  // nhap trừ Tong da lam tron) vao NGAY CO TRONG SO LON NHAT cua tung san
+  // pham (anh huong ty le % nho nhat), de TONG NGAN SACH luon khop CHINH XAC
+  // voi Ngan sach thang da cau hinh - du sua Trong so/% Ngan sach the nao.
+  products.forEach((p, prodIdx) => {
+    const roundedSum = perDayProduct.reduce((s, dayArr) => s + dayArr[prodIdx].budget, 0)
+    const diff = Math.round(p.budgetMonthly || 0) - roundedSum
+    if (!diff) return
+    let targetIdx = 0, maxWeight = -Infinity
+    days.forEach((d, i) => { if (d.weight > maxWeight) { maxWeight = d.weight; targetIdx = i } })
+    perDayProduct[targetIdx][prodIdx].budget += diff
+  })
+
+  // Buoc 3: tu Ngan sach (da hieu chinh chinh xac) suy nguoc ra
+  // Click/Impression/Order/GMV/CPA theo dung phễu CPC->CTR->CR->AOV.
+  const rows = days.map((d, i) => {
+    const perProduct = perDayProduct[i].map((pp) => {
+      const click = pp.cpc > 0 ? pp.budget / pp.cpc : 0
+      const impr = pp.ctr > 0 ? click / pp.ctr : 0
+      const order = click * pp.cr
+      const gmv = order * pp.aov
+      const cpa = order > 0 ? pp.budget / order : 0
+      return { ...pp, click, impr, order, gmv, cpa }
     })
     const totalBudget = perProduct.reduce((s, x) => s + x.budget, 0)
     const totalClick = perProduct.reduce((s, x) => s + x.click, 0)
@@ -2029,7 +2050,7 @@ function mpKpiCardsHTML(monthTotal) {
       ${i.badge ? `<span class="mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-medium ${i.badge.color}">${i.badge.label}</span>` : ''}
     </div>`).join('')}
   </div>
-  <p class="mt-2 text-[11px] text-gray-400">* Tổng ngân sách tính ra có thể chênh vài nghìn đồng so với Ngân sách tháng đã nhập ở trên — do mỗi ngày được làm tròn về hàng nghìn đồng (giống đúng công thức ROUND trong file Excel gốc), chênh lệch này không đáng kể (thường dưới 0,05%).</p>`
+  <p class="mt-2 text-[11px] text-gray-400">* Tổng ngân sách luôn khớp CHÍNH XÁC với Ngân sách tháng đã nhập ở trên (dù có sửa Trọng số/% Ngân sách/Giai đoạn thế nào) — phần lẻ phát sinh do làm tròn từng ngày về hàng nghìn được tự động dồn vào đúng 1 ngày cao điểm nhất của mỗi sản phẩm để tổng luôn tròn.</p>`
 }
 
 function mpProductBreakdownTableHTML(perProductTotal) {
@@ -2136,9 +2157,13 @@ function mpDailyTableHTML(planResult) {
   </table></div>`
 }
 
-function mpHourlyTableHTML(groupKey, groupLabel, hourlyResult) {
+function mpHourlyTableHTML(groupKey, groupLabel, hourlyResult, planResult) {
   const g = hourlyResult[groupKey]
   const isNormal = groupKey === 'normal'
+  const dayOptionsHtml = planResult.rows.map((r) => {
+    const [, mo, da] = r.date.split('-')
+    return `<option value="${r.date}">${da}/${mo} (${r.phase}) — ${formatVND(r.totalBudget)}</option>`
+  }).join('')
   const pctTotalPct = g.pctTotal * 100
   const warnOk = Math.abs(pctTotalPct - 100) <= 0.5
   const rows = g.slots.map((s, idx) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0 align-top">
@@ -2162,6 +2187,13 @@ function mpHourlyTableHTML(groupKey, groupLabel, hourlyResult) {
       <p class="text-xs flex flex-wrap items-center gap-1">Ngân sách đại diện/ngày: ${repBudgetControlHtml}
         · Tổng tỷ lệ: <b class="${warnOk ? 'text-green-600' : 'text-red-600'}">${pctTotalPct.toFixed(1)}%</b>${warnOk ? ' ✓' : ' ⚠️ nên = 100%'}
       </p>
+    </div>
+    <div class="mb-3 flex items-center gap-2 text-xs">
+      <span class="text-gray-400">Hoặc lấy ngân sách từ 1 ngày cụ thể trong bảng 31 ngày:</span>
+      <select data-mp="hourly-day-picker" data-group="${groupKey}" class="rounded border px-1.5 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800">
+        <option value="">— Chọn ngày —</option>
+        ${dayOptionsHtml}
+      </select>
     </div>
     <div class="overflow-x-auto"><table class="w-full text-left text-xs">
       <thead><tr class="border-b border-gray-200 dark:border-gray-800">
@@ -2210,6 +2242,13 @@ function handleMpFieldChange(e) {
   } else if (kind === 'hourly-rep-budget') {
     if (el.dataset.group === 'normal') mpEdit.hourlyPlan.normalRepBudget = toFloatOrZero(val)
     else mpEdit.hourlyPlan.bigSaleRepBudget = toFloatOrZero(val)
+  } else if (kind === 'hourly-day-picker') {
+    if (!val) return
+    const planResult = computePlan(mpEdit.assumptions, mpEdit.dailyPlan)
+    const row = planResult.rows.find((r) => r.date === val)
+    if (!row) return
+    if (el.dataset.group === 'normal') mpEdit.hourlyPlan.normalRepBudget = row.totalBudget
+    else mpEdit.hourlyPlan.bigSaleRepBudget = row.totalBudget
   } else if (kind === 'hourly-slot') {
     const group = el.dataset.group, idx = +el.dataset.idx, key = el.dataset.key
     const slot = mpEdit.hourlyPlan[group][idx]
@@ -2377,15 +2416,16 @@ function renderMediaPlanDetail(preserveScroll) {
 
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
       <h3 class="text-sm font-semibold mb-1">Phân bổ Ngân sách 31 ngày (chỉnh sửa được)</h3>
-      <p class="text-xs text-gray-400 mb-3">Đổi <b>Giai đoạn</b> mỗi ngày (Sale/Pre-heat/Sustain/Normal) để dời lịch Big Sale, hoặc sửa <b>Ghi chú chiến lược</b>. Ngân sách/GMV/Đơn hàng/ROAS mỗi ngày tự tính theo Trọng số giai đoạn ở trên.</p>
+      <p class="text-xs text-gray-400 mb-1">Đổi <b>Giai đoạn</b> mỗi ngày (Sale/Pre-heat/Sustain/Normal), sửa <b>Trọng số</b> riêng từng ngày, hoặc sửa <b>Ghi chú chiến lược</b>. Ngân sách/GMV/Đơn hàng/ROAS mỗi ngày tự tính theo Trọng số; sửa Trọng số ngày này sẽ tự chia lại tỷ lệ ngân sách các ngày khác — <b>Tổng ngân sách luôn giữ nguyên</b> bằng đúng Ngân sách tháng đã cấu hình.</p>
+      <p class="mb-3 text-sm">💰 Tổng ngân sách hiện tại: <b class="text-base">${formatVND(planResult.monthTotal.budget)}</b></p>
       ${mpDailyTableHTML(planResult)}
     </div>
 
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
       <h3 class="text-sm font-semibold mb-1">Phân bổ Ngân sách theo Khung giờ (chỉnh sửa được)</h3>
       <p class="text-xs text-gray-400 mb-4">Áp dụng cho 1 ngày đại diện — dùng để phân bổ bid/ngân sách trong ngày Big Sale và ngày thường.</p>
-      <div class="mb-6">${mpHourlyTableHTML('bigSale', '🔥 Ngày Big Sale', hourlyResult)}</div>
-      <div>${mpHourlyTableHTML('normal', '📅 Ngày thường (Normal)', hourlyResult)}</div>
+      <div class="mb-6">${mpHourlyTableHTML('bigSale', '🔥 Ngày Big Sale', hourlyResult, planResult)}</div>
+      <div>${mpHourlyTableHTML('normal', '📅 Ngày thường (Normal)', hourlyResult, planResult)}</div>
     </div>
 
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
