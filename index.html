@@ -833,6 +833,8 @@ function renderTopTable(containerId, rows, labelHeader) {
   container.innerHTML = `<table class="w-full text-left text-sm">
     <thead><tr class="border-b border-gray-200 dark:border-gray-800">
       <th class="py-2 pr-3 font-medium text-gray-400">${labelHeader}</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Lượt hiển thị</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Lượt click</th>
       <th class="py-2 pr-3 font-medium text-gray-400">Doanh thu</th>
       <th class="py-2 pr-3 font-medium text-gray-400">Chi phí</th>
       <th class="py-2 pr-3 font-medium text-gray-400">ROAS</th>
@@ -842,6 +844,8 @@ function renderTopTable(containerId, rows, labelHeader) {
     </tr></thead>
     <tbody>${rows.map((r) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
       <td class="max-w-[220px] truncate py-2 pr-3" title="${escapeHtml(r.label)}">${escapeHtml(r.label)}</td>
+      <td class="py-2 pr-3">${formatNumber(r.impressions)}</td>
+      <td class="py-2 pr-3">${formatNumber(r.clicks)}</td>
       <td class="py-2 pr-3">${formatVND(r.revenue)}</td>
       <td class="py-2 pr-3">${formatVND(r.cost)}</td>
       <td class="py-2 pr-3">${r.roas.toFixed(2)}x</td>
@@ -1370,6 +1374,16 @@ function computePlan(assumptions, dailyPlan) {
   // dong tac dong CPC/CTR/AOV.
   const roasTargetByPhase = assumptions.roasTargetByPhase || {}
   const crAdjustByPhase = {}
+  const sumUnitPerWeight = unitPerWeight.reduce((s, v) => s + v, 0)
+  // Ty le % Ngan sach/ngay chia cho tung san pham: MAC DINH ty le thuan voi
+  // Ngan sach thang cua tung san pham (unitPerWeight[idx]/tong), nhung co the
+  // GHI DE rieng cho TUNG NGAY qua d.productRatioOverride (mang ty le, tong=1)
+  // - vd nguoi dung muon 1 ngay cu the danh 70% cho San pham A thay vi ty le
+  // mac dinh theo Ngan sach thang.
+  function dayProductRatio(d, idx) {
+    if (Array.isArray(d.productRatioOverride) && d.productRatioOverride.length === products.length) return d.productRatioOverride[idx]
+    return sumUnitPerWeight > 0 ? unitPerWeight[idx] / sumUnitPerWeight : (1 / products.length)
+  }
   MP_PHASES.forEach((phase) => {
     const target = roasTargetByPhase[phase]
     if (target === null || target === undefined || !isFinite(target) || target <= 0) { crAdjustByPhase[phase] = 1; return }
@@ -1377,8 +1391,9 @@ function computePlan(assumptions, dailyPlan) {
     let sumBudget = 0, sumGmv = 0
     days.forEach((d) => {
       if (d.phase !== phase) return
+      const dayTotalBudget = d.weight * sumUnitPerWeight
       products.forEach((p, idx) => {
-        const budget = Math.round((d.weight * unitPerWeight[idx]) / 1000) * 1000
+        const budget = Math.round((dayTotalBudget * dayProductRatio(d, idx)) / 1000) * 1000
         const cpc = p.cpc * mult.cpc
         const cr = p.cr * mult.cr
         const click = cpc > 0 ? budget / cpc : 0
@@ -1397,9 +1412,10 @@ function computePlan(assumptions, dailyPlan) {
   const perDayProduct = days.map((d) => {
     const mult = assumptions.phaseMultipliers[d.phase] || { cpc: 1, ctr: 1, cr: 1, atc: 1 }
     const crAdjust = crAdjustByPhase[d.phase] || 1
+    const dayTotalBudget = d.weight * sumUnitPerWeight
     return products.map((p, idx) => ({
       name: p.name,
-      budget: Math.round((d.weight * unitPerWeight[idx]) / 1000) * 1000,
+      budget: Math.round((dayTotalBudget * dayProductRatio(d, idx)) / 1000) * 1000,
       cpc: p.cpc * mult.cpc, ctr: p.ctr * mult.ctr, cr: p.cr * mult.cr * crAdjust, atc: p.atc * mult.atc, aov: p.aov
     }))
   })
@@ -1458,14 +1474,16 @@ function computePlan(assumptions, dailyPlan) {
     const budget = rows.reduce((s, r) => s + r.perProduct[idx].budget, 0)
     const gmv = rows.reduce((s, r) => s + r.perProduct[idx].gmv, 0)
     const order = rows.reduce((s, r) => s + r.perProduct[idx].order, 0)
-    return { name: p.name, budget, gmv, order, roas: budget > 0 ? gmv / budget : 0, cpa: order > 0 ? budget / order : 0 }
+    const click = rows.reduce((s, r) => s + r.perProduct[idx].click, 0)
+    const impr = rows.reduce((s, r) => s + r.perProduct[idx].impr, 0)
+    return { name: p.name, budget, gmv, order, click, impr, roas: budget > 0 ? gmv / budget : 0, cpa: order > 0 ? budget / order : 0 }
   })
 
   const phaseGroupsMap = {}
   rows.forEach((r) => {
-    if (!phaseGroupsMap[r.phase]) phaseGroupsMap[r.phase] = { phase: r.phase, days: 0, budget: 0, gmv: 0, order: 0 }
+    if (!phaseGroupsMap[r.phase]) phaseGroupsMap[r.phase] = { phase: r.phase, days: 0, budget: 0, gmv: 0, order: 0, click: 0, impr: 0 }
     const g = phaseGroupsMap[r.phase]
-    g.days++; g.budget += r.totalBudget; g.gmv += r.totalGMV; g.order += r.totalOrder
+    g.days++; g.budget += r.totalBudget; g.gmv += r.totalGMV; g.order += r.totalOrder; g.click += r.totalClick; g.impr += r.totalImpr
   })
   const phaseSummary = Object.values(phaseGroupsMap)
     .map((g) => ({ ...g, budgetPct: monthTotal.budget > 0 ? (g.budget / monthTotal.budget) * 100 : 0, roas: g.budget > 0 ? g.gmv / g.budget : 0 }))
@@ -1537,6 +1555,62 @@ function applyPhaseBudgetPctOverride(mpEditRef, phase, targetPct) {
     const currentWeight = planResult.rows[idx].weight
     d.weightOverride = Number((currentWeight * scale).toFixed(4))
   })
+}
+
+/** Sua truc tiep "Tong NS" cua 1 ngay cu the -> tinh NGUOC ra Trong so can
+ * co de dat dung so tien do (2 chieu voi "day-weight": sua o nao thi o kia
+ * tu dong theo). Vi TongNS_ngay(w) = w * TongNganSachThang / TongTrongSo,
+ * va sua w cua 1 ngay se lam doi TongTrongSo, cong thuc duoc giai NGUOC
+ * CHINH XAC (khong xap xi) tu quan he:
+ *   desired = w' * BUDGET / (TongTrongSoCu - w_cu + w') */
+function applyDayBudgetOverride(mpEditRef, dayIdx, desiredBudget) {
+  const totalMonthlyBudget = mpEditRef.assumptions.products.reduce((s, p) => s + (p.budgetMonthly || 0), 0)
+  if (totalMonthlyBudget <= 0) return
+  const planResult = computePlan(mpEditRef.assumptions, mpEditRef.dailyPlan)
+  const row = planResult.rows[dayIdx]
+  if (!row) return
+  const wOld = row.weight
+  const totalWeightOld = planResult.totalWeight
+  const denom = totalMonthlyBudget - desiredBudget
+  if (denom <= 0) {
+    alert('Ngân sách của 1 ngày phải nhỏ hơn Tổng ngân sách tháng.')
+    return
+  }
+  let wNew = (desiredBudget * (totalWeightOld - wOld)) / denom
+  if (!isFinite(wNew) || wNew < 0) wNew = 0
+  mpEditRef.dailyPlan[dayIdx].weightOverride = Number(wNew.toFixed(4))
+}
+
+/** Ty le mac dinh (khong override) chia Ngan sach/ngay cho tung san pham:
+ * ty le thuan voi Ngan sach THANG da cau hinh cua tung san pham. */
+function defaultDayProductRatios(assumptions) {
+  const products = assumptions.products
+  const sumBudget = products.reduce((s, p) => s + (p.budgetMonthly || 0), 0)
+  return products.map((p) => (sumBudget > 0 ? (p.budgetMonthly || 0) / sumBudget : 1 / products.length))
+}
+
+/** Sua Ty le % Ngan sach/ngay cho 1 san pham cu the vao 1 ngay cu the ->
+ * chia lai phan con lai (1-ty le vua sua) cho cac san pham khac theo dung
+ * TY LE TUONG DOI hien tai giua chung (giong co che "% Ngan sach theo Giai
+ * doan"), luu vao dailyPlan[dayIdx].productRatioOverride (mang ty le, tong=1,
+ * chi ap dung rieng cho ngay do - khong anh huong cac ngay khac). */
+function applyDayProductRatioOverride(mpEditRef, dayIdx, prodIdx, newRatio) {
+  const day = mpEditRef.dailyPlan[dayIdx]
+  if (!day) return
+  const products = mpEditRef.assumptions.products
+  const n = products.length
+  if (n < 2) return
+  const current = (Array.isArray(day.productRatioOverride) && day.productRatioOverride.length === n)
+    ? day.productRatioOverride.slice()
+    : defaultDayProductRatios(mpEditRef.assumptions)
+  const clamped = Math.min(Math.max(newRatio, 0), 1)
+  const remaining = 1 - clamped
+  const othersSum = current.reduce((s, v, i) => (i === prodIdx ? s : s + v), 0)
+  const next = current.map((v, i) => {
+    if (i === prodIdx) return clamped
+    return othersSum > 0 ? (v / othersSum) * remaining : remaining / (n - 1)
+  })
+  day.productRatioOverride = next
 }
 
 function buildPlanSummaryFields(assumptions, dailyPlan) {
@@ -2087,6 +2161,8 @@ function mpKpiCardsHTML(monthTotal) {
   const crB = evalBenchmark('cvr', monthTotal.cr * 100)
   const items = [
     { label: 'Tổng ngân sách', value: formatVND(monthTotal.budget) },
+    { label: 'Lượt hiển thị kỳ vọng', value: formatNumber(monthTotal.impr) },
+    { label: 'Lượt click kỳ vọng', value: formatNumber(monthTotal.click) },
     { label: 'GMV kỳ vọng', value: formatVND(monthTotal.gmv) },
     { label: 'Đơn hàng kỳ vọng', value: formatNumber(monthTotal.order) },
     { label: 'ROAS kỳ vọng', value: monthTotal.roas.toFixed(2) + 'x', badge: roasB },
@@ -2110,6 +2186,8 @@ function mpProductBreakdownTableHTML(perProductTotal) {
     <thead><tr class="border-b border-gray-200 dark:border-gray-800">
       <th class="py-2 pr-3 font-medium text-gray-400">Sản phẩm</th>
       <th class="py-2 pr-3 font-medium text-gray-400">Ngân sách</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Lượt hiển thị</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Lượt click</th>
       <th class="py-2 pr-3 font-medium text-gray-400">GMV kỳ vọng</th>
       <th class="py-2 pr-3 font-medium text-gray-400">Đơn kỳ vọng</th>
       <th class="py-2 pr-3 font-medium text-gray-400">ROAS</th>
@@ -2120,6 +2198,8 @@ function mpProductBreakdownTableHTML(perProductTotal) {
       return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
       <td class="py-2 pr-3">${escapeHtml(p.name)}</td>
       <td class="py-2 pr-3">${formatVND(p.budget)}</td>
+      <td class="py-2 pr-3">${formatNumber(p.impr)}</td>
+      <td class="py-2 pr-3">${formatNumber(p.click)}</td>
       <td class="py-2 pr-3">${formatVND(p.gmv)}</td>
       <td class="py-2 pr-3">${formatNumber(p.order)}</td>
       <td class="py-2 pr-3">${p.roas.toFixed(2)}x <span class="ml-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${b.color}">${b.label}</span></td>
@@ -2136,6 +2216,8 @@ function mpPhaseSummaryTableHTML(phaseSummary) {
       <th class="py-2 pr-3 font-medium text-gray-400">Số ngày</th>
       <th class="py-2 pr-3 font-medium text-gray-400">Ngân sách</th>
       <th class="py-2 pr-3 font-medium text-gray-400">% Ngân sách (sửa được)</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Lượt hiển thị</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Lượt click</th>
       <th class="py-2 pr-3 font-medium text-gray-400">GMV kỳ vọng</th>
       <th class="py-2 pr-3 font-medium text-gray-400">Đơn kỳ vọng</th>
       <th class="py-2 pr-3 font-medium text-gray-400">ROAS kỳ vọng</th>
@@ -2149,6 +2231,8 @@ function mpPhaseSummaryTableHTML(phaseSummary) {
           ? `<input type="number" step="0.1" min="0.1" max="95" data-mp="phase-budget-pct" data-phase="${g.phase}" value="${g.budgetPct.toFixed(1)}" class="w-20 rounded border px-1.5 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" />%`
           : `<span class="text-gray-400">— (chưa có ngày nào)</span>`}
       </td>
+      <td class="py-2 pr-3">${formatNumber(g.impr)}</td>
+      <td class="py-2 pr-3">${formatNumber(g.click)}</td>
       <td class="py-2 pr-3">${formatVND(g.gmv)}</td>
       <td class="py-2 pr-3">${formatNumber(g.order)}</td>
       <td class="py-2 pr-3">${g.roas.toFixed(2)}x</td>
@@ -2158,12 +2242,23 @@ function mpPhaseSummaryTableHTML(phaseSummary) {
 }
 
 function mpDailyTableHTML(planResult) {
-  const productCols = (planResult.rows[0]?.perProduct || []).map((p) => `<th class="py-2 pr-2 font-medium text-gray-400 whitespace-nowrap">NS ${escapeHtml(p.name.split(' ')[0])}</th>`).join('')
+  const productCols = (planResult.rows[0]?.perProduct || []).map((p) => `<th class="py-2 pr-2 font-medium text-gray-400 whitespace-nowrap">Tỉ lệ / NS ${escapeHtml(p.name.split(' ')[0])}</th>`).join('')
 
   const rows = planResult.rows.map((r, idx) => {
     const [y, mo, da] = r.date.split('-')
     const dow = new Date(r.date + 'T00:00:00').toLocaleDateString('vi-VN', { weekday: 'short' })
     const dayType = r.phase === 'Sale' ? 'Sale Lớn' : (r.isWeekend ? 'Cuối tuần' : 'Ngày thường')
+    const isRatioOverridden = Array.isArray(r.productRatioOverride)
+    const productCells = r.perProduct.map((pp, pIdx) => {
+      const ratioPct = r.totalBudget > 0 ? (pp.budget / r.totalBudget) * 100 : 0
+      return `<td class="py-1.5 pr-2 whitespace-nowrap align-top">
+        <div class="flex items-center gap-1">
+          <input type="number" step="0.1" min="0" max="100" data-mp="day-product-ratio" data-idx="${idx}" data-pidx="${pIdx}" value="${ratioPct.toFixed(1)}" class="w-14 rounded border px-1 py-0.5 text-[11px] ${isRatioOverridden ? 'border-amber-400' : 'border-gray-300 dark:border-gray-700'} dark:bg-gray-800" title="Tỉ lệ % Tổng ngân sách ngày này dành cho ${escapeHtml(pp.name)} — đổi ô này sẽ tự chia lại tỉ lệ các sản phẩm khác" />%
+          ${isRatioOverridden && pIdx === 0 ? `<button type="button" data-mp-action="reset-day-ratio" data-idx="${idx}" class="text-[10px] text-gray-400 hover:text-gray-600" title="Đặt lại tỉ lệ tự động (theo Ngân sách tháng)">↺</button>` : ''}
+        </div>
+        <div class="mt-0.5 font-medium">${formatVND(pp.budget)}</div>
+      </td>`
+    }).join('')
     return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0 ${MP_PHASE_BADGE[r.phase] || ''}">
       <td class="py-1.5 pr-2 whitespace-nowrap">${da}/${mo} <span class="text-gray-400">(${dow})</span></td>
       <td class="py-1.5 pr-2">
@@ -2176,12 +2271,16 @@ function mpDailyTableHTML(planResult) {
         <input type="number" step="0.01" data-mp="day-weight" data-idx="${idx}" value="${r.weight.toFixed(2)}" class="w-16 rounded border px-1.5 py-1 text-xs ${r.isWeightOverridden ? 'border-amber-400' : 'border-gray-300 dark:border-gray-700'} dark:bg-gray-800" title="${r.isWeightOverridden ? 'Đang ghi đè thủ công (tự động theo Giai đoạn = ' + r.autoWeight.toFixed(2) + ')' : 'Tự động theo Giai đoạn — sửa để ghi đè riêng ngày này'}" />
         ${r.isWeightOverridden ? `<button type="button" data-mp-action="reset-day-weight" data-idx="${idx}" class="text-[10px] text-gray-400 hover:text-gray-600" title="Đặt lại tự động (=${r.autoWeight.toFixed(2)})">↺</button>` : ''}
       </td>
-      ${r.perProduct.map((pp) => `<td class="py-1.5 pr-2 whitespace-nowrap">${formatVND(pp.budget)}</td>`).join('')}
-      <td class="py-1.5 pr-2 font-medium whitespace-nowrap">${formatVND(r.totalBudget)}</td>
-      <td class="py-1.5 pr-2 whitespace-nowrap">${r.roas.toFixed(2)}x</td>
+      ${productCells}
+      <td class="py-1.5 pr-2 font-medium whitespace-nowrap">
+        <input type="number" step="1000" data-mp="day-budget" data-idx="${idx}" value="${Math.round(r.totalBudget)}" class="w-24 rounded border px-1.5 py-1 text-xs border-gray-300 dark:border-gray-700 dark:bg-gray-800" title="Sửa Tổng ngân sách ngày này sẽ tự tính lại Trọng số tương ứng (và ngược lại)" />
+      </td>
+      <td class="py-1.5 pr-2 whitespace-nowrap">${formatNumber(r.totalImpr)}</td>
+      <td class="py-1.5 pr-2 whitespace-nowrap">${formatNumber(r.totalClick)}</td>
       <td class="py-1.5 pr-2 whitespace-nowrap">${formatVND(r.blendedCpc)}</td>
       <td class="py-1.5 pr-2 whitespace-nowrap">${formatPercent(r.blendedCtr * 100)}</td>
       <td class="py-1.5 pr-2 whitespace-nowrap">${formatPercent(r.blendedCr * 100)}</td>
+      <td class="py-1.5 pr-2 whitespace-nowrap">${r.roas.toFixed(2)}x</td>
       <td class="py-1.5 pr-2 whitespace-nowrap">${formatVND(r.totalGMV)}</td>
       <td class="py-1.5 pr-2 whitespace-nowrap">${formatNumber(r.totalOrder)}</td>
       <td class="py-1.5 pr-2 min-w-[220px]">
@@ -2196,17 +2295,20 @@ function mpDailyTableHTML(planResult) {
       <th class="py-2 pr-2 font-medium text-gray-400">Loại ngày</th>
       <th class="py-2 pr-2 font-medium text-gray-400">Trọng số</th>
       ${productCols}
-      <th class="py-2 pr-2 font-medium text-gray-400">Tổng NS</th>
-      <th class="py-2 pr-2 font-medium text-gray-400">ROAS</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">Tổng NS (sửa được)</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">Lượt hiển thị</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">Lượt click</th>
       <th class="py-2 pr-2 font-medium text-gray-400">CPC</th>
       <th class="py-2 pr-2 font-medium text-gray-400">CTR</th>
       <th class="py-2 pr-2 font-medium text-gray-400">CR</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">ROAS</th>
       <th class="py-2 pr-2 font-medium text-gray-400">GMV kỳ vọng</th>
       <th class="py-2 pr-2 font-medium text-gray-400">Đơn kỳ vọng</th>
       <th class="py-2 pr-2 font-medium text-gray-400 min-w-[220px]">Ghi chú chiến lược</th>
     </tr></thead>
     <tbody>${rows}</tbody>
-  </table></div>`
+  </table></div>
+  <p class="mt-2 text-[11px] text-gray-400">Sửa <b>Trọng số</b> hoặc <b>Tổng NS</b> của 1 ngày đều được — sửa cái nào thì cái còn lại tự tính lại theo đúng cái đó (2 ô là 2 cách nhập cho cùng 1 giá trị). Mỗi ô <b>Tỉ lệ %</b> dưới cột sản phẩm là % của Tổng NS ngày đó dành cho sản phẩm tương ứng — mặc định chia theo tỉ lệ Ngân sách tháng đã cấu hình, sửa riêng 1 ô sẽ tự chia lại tỉ lệ các sản phẩm còn lại để luôn tổng = 100%.</p>`
 }
 
 function mpHourlyTableHTML(groupKey, groupLabel, hourlyResult, planResult) {
@@ -2290,6 +2392,10 @@ function handleMpFieldChange(e) {
     mpEdit.dailyPlan[+el.dataset.idx].phase = val
   } else if (kind === 'day-weight') {
     mpEdit.dailyPlan[+el.dataset.idx].weightOverride = toFloatOrZero(val)
+  } else if (kind === 'day-budget') {
+    applyDayBudgetOverride(mpEdit, +el.dataset.idx, toFloatOrZero(val))
+  } else if (kind === 'day-product-ratio') {
+    applyDayProductRatioOverride(mpEdit, +el.dataset.idx, +el.dataset.pidx, toFloatOrZero(val) / 100)
   } else if (kind === 'phase-budget-pct') {
     applyPhaseBudgetPctOverride(mpEdit, el.dataset.phase, toFloatOrZero(val) / 100)
   } else if (kind === 'day-note') {
@@ -2328,6 +2434,8 @@ function handleMpDetailClick(e) {
     mpEdit.hourlyPlan.normalRepBudget = null
   } else if (action === 'reset-day-weight') {
     mpEdit.dailyPlan[+el.dataset.idx].weightOverride = null
+  } else if (action === 'reset-day-ratio') {
+    mpEdit.dailyPlan[+el.dataset.idx].productRatioOverride = null
   } else if (action === 'reset-phase-multipliers') {
     if (!confirm('Đặt lại Hệ số nhân theo Giai đoạn về mặc định chuẩn ngành? (Sale CPC×1.2/CTR×1.35/CR×1.6/ATC×1.45, Pre-heat và Sustain tương ứng, Normal ×1)')) return
     mpEdit.assumptions.phaseMultipliers = JSON.parse(JSON.stringify(MP_DEFAULT_ASSUMPTIONS.phaseMultipliers))
@@ -2404,6 +2512,8 @@ function renderMediaPlanDetail(preserveScroll) {
     const rows = [
       { label: 'GMV / Doanh thu', target: planResult.monthTotal.gmv, actual: actualKpi.revenue, fmt: formatVND },
       { label: 'Chi phí Ads', target: planResult.monthTotal.budget, actual: actualKpi.cost, fmt: formatVND },
+      { label: 'Lượt hiển thị', target: planResult.monthTotal.impr, actual: actualKpi.impressions, fmt: formatNumber },
+      { label: 'Lượt click', target: planResult.monthTotal.click, actual: actualKpi.clicks, fmt: formatNumber },
       { label: 'ROAS', target: planResult.monthTotal.roas, actual: actualKpi.roas, fmt: (v) => v.toFixed(2) + 'x' },
       { label: 'CPA', target: planResult.monthTotal.cpa, actual: actualKpi.cpa, fmt: formatVND },
       { label: 'CPC', target: planResult.monthTotal.cpc, actual: actualKpi.cpc, fmt: formatVND },
@@ -2862,7 +2972,8 @@ function aaKpiCardsHTML(kpi) {
     { key: 'cpc', label: 'CPC', fmt: formatVND },
     { key: 'cpa', label: 'CPA', fmt: formatVND },
     { key: 'orders', label: 'Đơn hàng', fmt: formatNumber },
-    { key: 'clicks', label: 'Click', fmt: formatNumber }
+    { key: 'impressions', label: 'Lượt hiển thị', fmt: formatNumber },
+    { key: 'clicks', label: 'Lượt click', fmt: formatNumber }
   ]
   return `<div class="grid grid-cols-2 gap-3 sm:grid-cols-5">${defs.map((d) => `
     <div class="card p-3 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
@@ -2896,6 +3007,8 @@ function aaDailyTableHTML(dailyRows) {
   return `<table class="w-full text-left text-sm">
     <thead><tr class="border-b border-gray-200 dark:border-gray-800">
       <th class="py-2 pr-3 font-medium text-gray-400">Ngày</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Lượt hiển thị</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Lượt click</th>
       <th class="py-2 pr-3 font-medium text-gray-400">Chi phí</th>
       <th class="py-2 pr-3 font-medium text-gray-400">Doanh số</th>
       <th class="py-2 pr-3 font-medium text-gray-400">ROAS</th>
@@ -2914,6 +3027,8 @@ function aaDailyTableHTML(dailyRows) {
       const [y, m, dd] = d.date.split('-')
       return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
         <td class="py-1.5 pr-3 whitespace-nowrap font-medium">${dd}/${m}/${y}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${formatNumber(d.impressions)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${formatNumber(d.clicks)}</td>
         <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(d.cost)}</td>
         <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(d.revenue)}</td>
         <td class="py-1.5 pr-3 whitespace-nowrap">${d.roas.toFixed(2)}x</td>
@@ -2945,6 +3060,8 @@ function aaPlanVsActualTableHTML(dailyRows) {
       <th class="py-2 pr-3 font-medium text-gray-400">Ngân sách thực chi</th>
       <th class="py-2 pr-3 font-medium text-gray-400 min-w-[100px]">ROAS tham chiếu</th>
       <th class="py-2 pr-3 font-medium text-gray-400">ROAS thực tế</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Hiển thị (T.chiếu / T.tế)</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Click (T.chiếu / T.tế)</th>
       <th class="py-2 pr-3 font-medium text-gray-400">CPC (T.chiếu / T.tế)</th>
       <th class="py-2 pr-3 font-medium text-gray-400">CTR (T.chiếu / T.tế)</th>
       <th class="py-2 pr-3 font-medium text-gray-400">CR (T.chiếu / T.tế)</th>
@@ -2963,11 +3080,12 @@ function aaPlanVsActualTableHTML(dailyRows) {
         const aovRef = planDay.totalOrder > 0 ? planDay.totalGMV / planDay.totalOrder : 0
         const crRef = (cpcRef > 0 && aovRef > 0) ? (Number(roasRef) * cpcRef / aovRef) : 0
         const clickRef = cpcRef > 0 ? d.cost / cpcRef : 0
+        const imprRef = ctrRef > 0 ? clickRef / ctrRef : 0
         const orderRef = clickRef * crRef
         const gmvRef = orderRef * aovRef
         const atcRef = clickRef * atcRateRef
         const cpaRef = orderRef > 0 ? d.cost / orderRef : 0
-        refCalc = { cpcRef, ctrRef, crRef, atcRef, cpaRef, orderRef, gmvRef }
+        refCalc = { cpcRef, ctrRef, crRef, atcRef, cpaRef, orderRef, gmvRef, clickRef, imprRef }
       }
       const fmt2 = (refVal, actVal, fmtFn) => `<span class="text-gray-400">${refCalc ? fmtFn(refVal) : '—'}</span> / <span class="font-medium">${fmtFn(actVal)}</span>`
       return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
@@ -2976,6 +3094,8 @@ function aaPlanVsActualTableHTML(dailyRows) {
         <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(d.cost)}</td>
         <td class="py-1.5 pr-3 whitespace-nowrap"><input type="number" step="0.1" data-aa="roas-ref" data-date="${d.date}" value="${roasRef ?? ''}" placeholder="vd 8" class="w-20 rounded border px-2 py-1 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></td>
         <td class="py-1.5 pr-3 whitespace-nowrap font-medium">${d.roas.toFixed(2)}x</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2(refCalc?.imprRef, d.impressions, formatNumber)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2(refCalc?.clickRef, d.clicks, formatNumber)}</td>
         <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2(refCalc?.cpcRef, d.cpc, formatVND)}</td>
         <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2((refCalc?.ctrRef || 0) * 100, d.ctr * 100, formatPercent)}</td>
         <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2((refCalc?.crRef || 0) * 100, d.cr * 100, formatPercent)}</td>
