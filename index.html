@@ -1347,8 +1347,14 @@ function computePlan(assumptions, dailyPlan) {
     const dow = new Date(d.date + 'T00:00:00').getDay() // 0=CN,6=T7
     const isWeekend = dow === 0 || dow === 6
     const phaseW = assumptions.phaseWeights[d.phase] ?? 1
-    const weight = phaseW * (isWeekend ? assumptions.weekendMultiplier : 1)
-    return { ...d, isWeekend, weight }
+    const autoWeight = phaseW * (isWeekend ? assumptions.weekendMultiplier : 1)
+    // Trong so moi ngay MAC DINH tinh tu Giai doan x He so cuoi tuan, nhung
+    // nguoi dung co the GHI DE truc tiep (d.weightOverride) - vd de tang/giam
+    // rieng 1 ngay ma khong doi Giai doan, hoac khi sua "% Ngan sach" theo
+    // Giai doan (applyPhaseBudgetPctOverride se ghi weightOverride hang loat).
+    const isWeightOverridden = d.weightOverride !== null && d.weightOverride !== undefined
+    const weight = isWeightOverridden ? d.weightOverride : autoWeight
+    return { ...d, isWeekend, weight, autoWeight, isWeightOverridden }
   })
   const totalWeight = days.reduce((s, d) => s + d.weight, 0)
   const unitPerWeight = products.map((p) => (totalWeight > 0 ? p.budgetMonthly / totalWeight : 0))
@@ -1448,6 +1454,36 @@ function computeHourly(assumptions, planResult, hourlyPlan) {
     autoNormalRepBudget,
     isNormalOverridden
   }
+}
+
+/** Sua "% Ngan sach" cua 1 Giai doan (o bang tong hop) -> tinh nguoc ra
+ * Trong so can co cua giai doan do de dat dung % muc tieu, roi CHIA LAI theo
+ * dung TY LE hien tai giua cac ngay trong giai doan (giu nguyen chenh lech
+ * tuong doi giua cac ngay, vd ngay Sale luon > ngay thuong trong cung giai
+ * doan neu dang co override rieng), giu nguyen Trong so cac giai doan khac.
+ * Ket qua: ghi weightOverride cho TUNG ngay thuoc giai doan nay. */
+function applyPhaseBudgetPctOverride(mpEditRef, phase, targetPct) {
+  const planResult = computePlan(mpEditRef.assumptions, mpEditRef.dailyPlan)
+  const daysInPhase = planResult.rows.filter((r) => r.phase === phase)
+  if (!daysInPhase.length) {
+    alert(`Giai đoạn "${phase}" hiện chưa có ngày nào — hãy đổi Giai đoạn cho ít nhất 1 ngày sang "${phase}" trước khi sửa % Ngân sách.`)
+    return
+  }
+  const weightPhaseOld = daysInPhase.reduce((s, r) => s + r.weight, 0)
+  const otherWeight = planResult.totalWeight - weightPhaseOld
+  const clampedPct = Math.min(Math.max(targetPct, 0.001), 0.95)
+  if (otherWeight <= 0) {
+    alert('Không thể đổi % vì giai đoạn này đang chiếm 100% ngân sách (không còn giai đoạn nào khác để cân đối).')
+    return
+  }
+  const weightPhaseNew = (clampedPct * otherWeight) / (1 - clampedPct)
+  const scale = weightPhaseOld > 0 ? weightPhaseNew / weightPhaseOld : 1
+
+  mpEditRef.dailyPlan.forEach((d, idx) => {
+    if (d.phase !== phase) return
+    const currentWeight = planResult.rows[idx].weight
+    d.weightOverride = Number((currentWeight * scale).toFixed(4))
+  })
 }
 
 function buildPlanSummaryFields(assumptions, dailyPlan) {
@@ -2026,7 +2062,7 @@ function mpPhaseSummaryTableHTML(phaseSummary) {
       <th class="py-2 pr-3 font-medium text-gray-400">Giai đoạn</th>
       <th class="py-2 pr-3 font-medium text-gray-400">Số ngày</th>
       <th class="py-2 pr-3 font-medium text-gray-400">Ngân sách</th>
-      <th class="py-2 pr-3 font-medium text-gray-400">% Ngân sách</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">% Ngân sách (sửa được)</th>
       <th class="py-2 pr-3 font-medium text-gray-400">GMV kỳ vọng</th>
       <th class="py-2 pr-3 font-medium text-gray-400">Đơn kỳ vọng</th>
       <th class="py-2 pr-3 font-medium text-gray-400">ROAS kỳ vọng</th>
@@ -2035,12 +2071,17 @@ function mpPhaseSummaryTableHTML(phaseSummary) {
       <td class="py-2 pr-3">${g.phase}</td>
       <td class="py-2 pr-3">${g.days}</td>
       <td class="py-2 pr-3">${formatVND(g.budget)}</td>
-      <td class="py-2 pr-3">${g.budgetPct.toFixed(1)}%</td>
+      <td class="py-2 pr-3 whitespace-nowrap">
+        ${g.days > 0
+          ? `<input type="number" step="0.1" min="0.1" max="95" data-mp="phase-budget-pct" data-phase="${g.phase}" value="${g.budgetPct.toFixed(1)}" class="w-20 rounded border px-1.5 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" />%`
+          : `<span class="text-gray-400">— (chưa có ngày nào)</span>`}
+      </td>
       <td class="py-2 pr-3">${formatVND(g.gmv)}</td>
       <td class="py-2 pr-3">${formatNumber(g.order)}</td>
       <td class="py-2 pr-3">${g.roas.toFixed(2)}x</td>
     </tr>`).join('')}</tbody>
-  </table>`
+  </table>
+  <p class="mt-2 text-[11px] text-gray-400">Sửa % Ngân sách của 1 Giai đoạn sẽ tự động chia lại Trọng số các ngày trong giai đoạn đó (giữ nguyên tỷ lệ giữa các ngày với nhau, giữ nguyên Trọng số các giai đoạn khác) để ngân sách khớp đúng %. Tổng % của các giai đoạn luôn = 100%.</p>`
 }
 
 function mpDailyTableHTML(planResult) {
@@ -2058,7 +2099,10 @@ function mpDailyTableHTML(planResult) {
         </select>
       </td>
       <td class="py-1.5 pr-2 text-gray-400 whitespace-nowrap">${dayType}</td>
-      <td class="py-1.5 pr-2">${r.weight.toFixed(2)}</td>
+      <td class="py-1.5 pr-2 whitespace-nowrap">
+        <input type="number" step="0.01" data-mp="day-weight" data-idx="${idx}" value="${r.weight.toFixed(2)}" class="w-16 rounded border px-1.5 py-1 text-xs ${r.isWeightOverridden ? 'border-amber-400' : 'border-gray-300 dark:border-gray-700'} dark:bg-gray-800" title="${r.isWeightOverridden ? 'Đang ghi đè thủ công (tự động theo Giai đoạn = ' + r.autoWeight.toFixed(2) + ')' : 'Tự động theo Giai đoạn — sửa để ghi đè riêng ngày này'}" />
+        ${r.isWeightOverridden ? `<button type="button" data-mp-action="reset-day-weight" data-idx="${idx}" class="text-[10px] text-gray-400 hover:text-gray-600" title="Đặt lại tự động (=${r.autoWeight.toFixed(2)})">↺</button>` : ''}
+      </td>
       ${r.perProduct.map((pp) => `<td class="py-1.5 pr-2 whitespace-nowrap">${formatVND(pp.budget)}</td>`).join('')}
       <td class="py-1.5 pr-2 font-medium whitespace-nowrap">${formatVND(r.totalBudget)}</td>
       <td class="py-1.5 pr-2 whitespace-nowrap">${r.roas.toFixed(2)}x</td>
@@ -2157,6 +2201,10 @@ function handleMpFieldChange(e) {
     mpEdit.assumptions.phaseMultipliers[el.dataset.phase][el.dataset.key] = toFloatOrZero(val)
   } else if (kind === 'day-phase') {
     mpEdit.dailyPlan[+el.dataset.idx].phase = val
+  } else if (kind === 'day-weight') {
+    mpEdit.dailyPlan[+el.dataset.idx].weightOverride = toFloatOrZero(val)
+  } else if (kind === 'phase-budget-pct') {
+    applyPhaseBudgetPctOverride(mpEdit, el.dataset.phase, toFloatOrZero(val) / 100)
   } else if (kind === 'day-note') {
     mpEdit.dailyPlan[+el.dataset.idx].note = val
   } else if (kind === 'hourly-rep-budget') {
@@ -2184,6 +2232,8 @@ function handleMpDetailClick(e) {
 
   if (action === 'reset-normal-rep-budget') {
     mpEdit.hourlyPlan.normalRepBudget = null
+  } else if (action === 'reset-day-weight') {
+    mpEdit.dailyPlan[+el.dataset.idx].weightOverride = null
   } else if (action === 'add-product') {
     const n = mpEdit.assumptions.products.length + 1
     mpEdit.assumptions.products.push({ name: `Sản phẩm ${n}`, budgetMonthly: 0, cpc: 0, ctr: 0, cr: 0, atc: 0, aov: 0 })
