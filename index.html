@@ -584,20 +584,20 @@ function dashboardSkeletonHTML() {
     </div>
 
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
-      <h3 class="text-sm font-semibold mb-1">So sánh hiệu quả theo Kỳ</h3>
-      <p class="text-xs text-gray-400 mb-3">Đối chiếu số liệu giữa 3 kỳ liên tiếp (theo bộ lọc Shop/Campaign/Sản phẩm hiện tại) để thấy xu hướng hiệu quả quảng cáo</p>
+      <h3 class="text-sm font-semibold mb-1">Phân tích bán hàng — So sánh 3 mốc thời gian</h3>
+      <p class="text-xs text-gray-400 mb-3">Tự chọn 3 mốc (Tháng/Quý/Năm) để đối chiếu chênh lệch số liệu và nhận đề xuất điều chỉnh quảng cáo (theo bộ lọc Shop/Campaign/Sản phẩm ở trên)</p>
       <div class="flex flex-wrap items-end gap-3 mb-4">
-        <div><label class="mb-1 block text-xs font-medium text-gray-400">Loại kỳ</label>
+        <div><label class="mb-1 block text-xs font-medium text-gray-400">Loại mốc</label>
           <select id="cmp_periodType" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800">
             <option value="month" selected>Theo tháng</option>
             <option value="quarter">Theo quý</option>
             <option value="year">Theo năm</option>
           </select></div>
-        <div><label class="mb-1 block text-xs font-medium text-gray-400">Kỳ 1 (cũ nhất)</label>
+        <div><label class="mb-1 block text-xs font-medium text-gray-400">Mốc 1 (cũ nhất)</label>
           <select id="cmp_p1" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800"></select></div>
-        <div><label class="mb-1 block text-xs font-medium text-gray-400">Kỳ 2</label>
+        <div><label class="mb-1 block text-xs font-medium text-gray-400">Mốc 2</label>
           <select id="cmp_p2" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800"></select></div>
-        <div><label class="mb-1 block text-xs font-medium text-gray-400">Kỳ 3 (mới nhất)</label>
+        <div><label class="mb-1 block text-xs font-medium text-gray-400">Mốc 3 (mới nhất)</label>
           <select id="cmp_p3" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800"></select></div>
       </div>
       <div id="cmp_table" class="overflow-x-auto mb-4"></div>
@@ -657,16 +657,41 @@ async function loadDashboardData() {
 function populateFilterOptions() {
   const shops = [...new Set(dashRawRows.map((r) => r.shop_name).filter(Boolean))].sort()
   const campaigns = [...new Set(dashRawRows.map((r) => r.ten_dich_vu_hien_thi).filter(Boolean))].sort()
-  const products = [...new Set(dashRawRows.map((r) => r.ma_san_pham).filter(Boolean))].sort()
   fillSelect('f_shop', shops)
   fillSelect('f_campaign', campaigns)
-  fillSelect('f_product', products)
+  fillSelectWithLabel('f_product', buildProductOptions(dashRawRows))
 }
 function fillSelect(id, values) {
   const el = document.getElementById(id)
   const current = el.value
   el.innerHTML = '<option value="">Tất cả</option>' + values.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')
   if (values.includes(current)) el.value = current
+}
+
+// Du lieu goc chi co "Ma san pham" (day so, kho nhan biet). Xay dung nhan
+// hien thi de nguoi dung chon theo TEN san pham/chien dich cho de tim, gia
+// tri filter (ma_san_pham) van giu nguyen phia sau de loc chinh xac.
+function buildProductOptions(rows) {
+  const map = new Map()
+  rows.forEach((r) => {
+    const code = r.ma_san_pham
+    if (!code || code === '-') return
+    if (!map.has(code)) {
+      const name = r.ten_dich_vu_hien_thi || r.noi_dung_dich_vu_hien_thi || code
+      map.set(code, name)
+    }
+  })
+  return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1], 'vi'))
+}
+
+function fillSelectWithLabel(id, entries) {
+  const el = document.getElementById(id)
+  const current = el.value
+  el.innerHTML = '<option value="">Tất cả</option>' + entries.map(([value, label]) => {
+    const shortLabel = label.length > 60 ? label.slice(0, 60) + '…' : label
+    return `<option value="${escapeHtml(value)}" title="${escapeHtml(label)}">${escapeHtml(shortLabel)}</option>`
+  }).join('')
+  if (entries.some(([value]) => value === current)) el.value = current
 }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
@@ -962,6 +987,79 @@ function buildComparisonSummary(labels, kpi1, kpi3) {
   return parts.join(' ')
 }
 
+// Sinh de xuat dieu chinh quang cao theo TUNG chi so, dua tren xu huong
+// (Moc 1 -> Moc 3) ket hop nguong tham khao (voi ROAS/ACOS/CTR/CVR).
+// Day la goi y RULE-BASED don gian, mang tinh tham khao, khong thay the
+// viec nguoi quan ly quang cao tu danh gia theo boi canh thuc te.
+function getRecommendation(key, kpi1, kpi3) {
+  const v1 = kpi1[key], v3 = kpi3[key]
+  const change = pctChange(v1, v3)
+  const up = change !== null && change > 5
+  const down = change !== null && change < -5
+
+  switch (key) {
+    case 'roas': {
+      const tier = evalBenchmark('roas', v3).label
+      if (tier === 'Cần cải thiện') return 'ROAS đang thấp — nên loại bớt từ khóa/vị trí kém hiệu quả, thu hẹp targeting.'
+      if (down) return 'ROAS giảm — rà soát lại chiến dịch, cân nhắc giảm ngân sách phần kém hiệu quả.'
+      if (up) return 'ROAS cải thiện — có thể tăng ngân sách để mở rộng quy mô.'
+      return 'ROAS ổn định — duy trì chiến lược hiện tại.'
+    }
+    case 'acos': {
+      const tier = evalBenchmark('acos', v3).label
+      if (tier === 'Cần cải thiện') return 'ACOS cao — giảm giá thầu hoặc loại bỏ từ khóa chi phí cao nhưng ít chuyển đổi.'
+      if (up) return 'ACOS tăng — theo dõi sát, cân nhắc điều chỉnh giá thầu.'
+      if (down) return 'ACOS giảm — hiệu quả chi phí đang tốt lên.'
+      return 'ACOS ổn định.'
+    }
+    case 'ctr': {
+      const tier = evalBenchmark('ctr', v3).label
+      if (tier === 'Thấp') return 'CTR thấp — cải thiện hình ảnh/tiêu đề sản phẩm hoặc đổi vị trí quảng cáo.'
+      if (down) return 'CTR giảm — nội dung/hình ảnh quảng cáo có thể đang kém hấp dẫn hơn.'
+      if (up) return 'CTR tăng — nội dung đang thu hút, có thể nhân rộng cách làm.'
+      return 'CTR ổn định.'
+    }
+    case 'cpc':
+      if (up) return 'CPC tăng — xem lại chiến lược đấu thầu, cân nhắc chuyển sang tối ưu theo ROAS.'
+      if (down) return 'CPC giảm — chi phí mỗi click đang tối ưu tốt.'
+      return 'CPC ổn định.'
+    case 'cpm':
+      if (up) return 'CPM tăng — chi phí hiển thị cao hơn, cân nhắc điều chỉnh đối tượng/vị trí quảng cáo.'
+      if (down) return 'CPM giảm — chi phí hiển thị đang tối ưu.'
+      return 'CPM ổn định.'
+    case 'cpa':
+      if (up) return 'CPA tăng — tối ưu lại trang sản phẩm hoặc thu hẹp đối tượng target.'
+      if (down) return 'CPA giảm — chi phí mỗi chuyển đổi đang tốt lên.'
+      return 'CPA ổn định.'
+    case 'cvr': {
+      const tier = evalBenchmark('cvr', v3).label
+      if (tier === 'Thấp') return 'CVR thấp — kiểm tra giá bán, đánh giá sản phẩm, hoặc trải nghiệm trang sản phẩm.'
+      if (down) return 'CVR giảm — xem lại giá/khuyến mãi hoặc trải nghiệm mua hàng.'
+      if (up) return 'CVR tăng — sản phẩm/giá đang hấp dẫn khách hơn.'
+      return 'CVR ổn định.'
+    }
+    case 'cost':
+      if (up) return 'Chi phí tăng — đối chiếu với Doanh thu/ROAS để xem có tương xứng không.'
+      if (down) return 'Chi phí giảm — kiểm tra xem có ảnh hưởng độ phủ/doanh thu không.'
+      return 'Chi phí ổn định.'
+    case 'revenue':
+      if (up) return 'Doanh thu tăng — hiệu quả tổng thể tốt, có thể cân nhắc mở rộng ngân sách.'
+      if (down) return 'Doanh thu giảm — cần xem lại toàn bộ chiến dịch, sản phẩm quảng cáo.'
+      return 'Doanh thu ổn định.'
+    case 'clicks':
+    case 'impressions':
+      if (down) return 'Giảm — có thể do ngân sách hoặc cạnh tranh từ khóa tăng.'
+      if (up) return 'Tăng — độ phủ quảng cáo đang mở rộng.'
+      return 'Ổn định.'
+    case 'orders':
+      if (up) return 'Số đơn tăng — hiệu quả bán hàng tốt.'
+      if (down) return 'Số đơn giảm — xem lại phễu chuyển đổi (CTR, CVR).'
+      return 'Ổn định.'
+    default:
+      return '—'
+  }
+}
+
 function renderComparison() {
   const periodType = document.getElementById('cmp_periodType').value
   const rows = getComparisonRows()
@@ -991,9 +1089,10 @@ function renderComparison() {
       <th class="py-2 pr-3 font-medium text-gray-400">Chỉ số</th>
       <th class="py-2 pr-3 font-medium text-gray-400">${labels[0]}</th>
       <th class="py-2 pr-3 font-medium text-gray-400">${labels[1]}</th>
-      <th class="py-2 pr-3 font-medium text-gray-400">% so với Kỳ 1</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">% so với Mốc 1</th>
       <th class="py-2 pr-3 font-medium text-gray-400">${labels[2]}</th>
-      <th class="py-2 pr-3 font-medium text-gray-400">% so với Kỳ 2</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">% so với Mốc 2</th>
+      <th class="py-2 pr-3 font-medium text-gray-400 min-w-[220px]">Đề xuất điều chỉnh</th>
     </tr></thead>
     <tbody>
       ${CMP_METRIC_ROWS.map((d) => {
@@ -1005,6 +1104,7 @@ function renderComparison() {
           <td class="py-2 pr-3">${changeBadge(pctChange(v1, v2), d.dir)}</td>
           <td class="py-2 pr-3">${d.fmt(v3)}</td>
           <td class="py-2 pr-3">${changeBadge(pctChange(v2, v3), d.dir)}</td>
+          <td class="py-2 pr-3 text-xs text-gray-600 dark:text-gray-300">${getRecommendation(d.key, kpi1, kpi3)}</td>
         </tr>`
       }).join('')}
     </tbody>
