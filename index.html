@@ -80,6 +80,7 @@
       <button data-page="dashboard" class="nav-btn flex items-center gap-3 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-brand-50 dark:hover:bg-white/5">📊 Dashboard</button>
       <button data-page="upload" class="nav-btn flex items-center gap-3 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-brand-50 dark:hover:bg-white/5">⬆️ Upload dữ liệu</button>
       <button data-page="mediaplan" class="nav-btn flex items-center gap-3 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-brand-50 dark:hover:bg-white/5">📅 Kế hoạch tháng</button>
+      <button data-page="adsanalysis" class="nav-btn flex items-center gap-3 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-brand-50 dark:hover:bg-white/5">📈 Phân tích ads</button>
     </nav>
     <div class="mt-auto border-t border-gray-200 dark:border-gray-800 pt-4 text-xs text-gray-400">
       Đăng nhập: <span id="userEmailLabel" class="font-medium text-gray-600 dark:text-gray-300"></span>
@@ -98,6 +99,7 @@
       <div id="page-dashboard" class="page-section flex flex-col gap-6"></div>
       <div id="page-upload" class="page-section hidden-important flex flex-col gap-6"></div>
       <div id="page-mediaplan" class="page-section hidden-important flex flex-col gap-6"></div>
+      <div id="page-adsanalysis" class="page-section hidden-important flex flex-col gap-6"></div>
     </main>
   </div>
 </div>
@@ -252,8 +254,8 @@ async function readRawRows(file) {
   return XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null })
 }
 
-function findHeaderRowIndex(rows) {
-  const first = nfc(COLUMNS[0].header), second = nfc(COLUMNS[1].header)
+function findHeaderRowIndex(rows, columns = COLUMNS) {
+  const first = nfc(columns[0].header), second = nfc(columns[1].header)
   for (let i = 0; i < Math.min(rows.length, 20); i++) {
     const row = rows[i] || []
     if (nfc(String(row[0] ?? '').trim()) === first && nfc(String(row[1] ?? '').trim()) === second) return i
@@ -490,6 +492,7 @@ function goToPage(page) {
   if (page === 'dashboard') { if (!dashboardInitialized) initDashboardPage(); else loadDashboardData() }
   if (page === 'upload') { if (!uploadInitialized) initUploadPage(); else loadUploadHistory() }
   if (page === 'mediaplan') { if (!mediaPlanInitialized) initMediaPlanPage(); else loadMediaPlanList() }
+  if (page === 'adsanalysis') { if (!adsAnalysisInitialized) initAdsAnalysisPage(); else loadAdsAnalysisData() }
 }
 document.querySelectorAll('.nav-btn').forEach((btn) => btn.addEventListener('click', () => goToPage(btn.dataset.page)))
 
@@ -2492,6 +2495,527 @@ function renderMediaPlanDetail(preserveScroll) {
 
   updateMpSaveStatusBadge()
   if (scrollTop !== null && main) requestAnimationFrame(() => { main.scrollTop = scrollTop })
+}
+
+/* -----------------------------------------------------------------------
+   9c. TRANG PHAN TICH ADS (THEO NGAY THAT)
+   Khac voi Dashboard/Upload (du lieu THANG, uoc luong ngay tu "Ngay bat
+   dau"), trang nay dung file "Data ad TX.xlsx" co san cot "Ngay" THAT ->
+   cho phep xem/so sanh hieu qua CHINH XAC theo tung ngay, va doi chieu
+   voi Ke hoach thang (media_plans) qua 1 o "ROAS tham chieu" nhap tay:
+   tu ROAS do + Ngan sach THUC CHI cua dung ngay do, suy nguoc ra 1 kich
+   ban "ky vong" (CPC/CTR/CR/ATC/CPA/Don/GMV) giu nguyen CPC/CTR/ATC/AOV
+   theo chuan Giai doan trong Ke hoach - dung cong thuc ROAS=CR*AOV/CPC
+   (giong co che "ROAS muc tieu theo Giai doan" ben trang Ke hoach thang).
+   ----------------------------------------------------------------------- */
+const COLUMNS_DAILY = [
+  { header: 'Ngày', key: 'ngay', type: 'int' },
+  ...COLUMNS.filter((c) => c.key !== 'cot_an')
+]
+const REQUIRED_KEYS_DAILY = ['ngay', 'thang', 'nam', 'ten_dich_vu_hien_thi']
+
+/** Doc + validate + chuan hoa file "Data ad TX.xlsx" (co cot Ngay that) */
+async function parseAdsDailyFile(file, shopName) {
+  const rawRows = await readRawRows(file)
+  const headerIdx = findHeaderRowIndex(rawRows, COLUMNS_DAILY)
+
+  if (headerIdx === -1) {
+    return {
+      headerValid: false,
+      missingColumns: COLUMNS_DAILY.map((c) => c.header),
+      rows: [],
+      errors: [{ row: 0, message: 'Không tìm thấy dòng tiêu đề đúng định dạng (Ngày, Tháng, Năm, ...).' }],
+      totalDataRows: 0
+    }
+  }
+
+  const headerRow = (rawRows[headerIdx] || []).map((h) => nfc(String(h ?? '').trim()))
+  const missingColumns = COLUMNS_DAILY.filter((c) => !headerRow.includes(nfc(c.header))).map((c) => c.header)
+  const headerValid = missingColumns.length === 0
+
+  const colIndexByKey = {}
+  COLUMNS_DAILY.forEach((c) => { colIndexByKey[c.key] = headerRow.indexOf(nfc(c.header)) })
+
+  const dataRows = rawRows.slice(headerIdx + 1).filter((r) => r && r.some((cell) => cell !== null && cell !== undefined && cell !== ''))
+
+  const rows = [], errors = []
+  dataRows.forEach((raw, i) => {
+    const rowNum = headerIdx + 2 + i
+    const obj = { shop_name: shopName, source_file_name: file.name }
+    let hasError = false
+    COLUMNS_DAILY.forEach((col) => {
+      const idx = colIndexByKey[col.key]
+      obj[col.key] = CASTERS[col.type](idx >= 0 ? raw[idx] : null)
+    })
+    REQUIRED_KEYS_DAILY.forEach((key) => {
+      if (obj[key] === null || obj[key] === undefined || obj[key] === '') {
+        hasError = true
+        errors.push({ row: rowNum, message: `Thiếu giá trị bắt buộc cho cột "${key}".` })
+      }
+    })
+    if (!hasError) rows.push(obj)
+  })
+
+  return { headerValid, missingColumns, rows, errors, totalDataRows: dataRows.length }
+}
+
+const TABLE_DAILY = 'ads_daily_reports'
+
+async function syncAdsDailyToSupabase(rows, { fileName, shopName, userId, onProgress }) {
+  const totalRows = rows.length
+
+  const { data: historyRow, error: historyError } = await sb
+    .from('upload_history')
+    .insert({ file_name: fileName, shop_name: shopName, uploaded_by: userId, total_rows: totalRows, status: 'processing' })
+    .select().single()
+  if (historyError) throw historyError
+
+  const { count: countBefore } = await sb.from(TABLE_DAILY).select('id', { count: 'exact', head: true }).eq('shop_name', shopName)
+
+  let processed = 0
+  const failedBatches = []
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE)
+    const { error } = await sb.from(TABLE_DAILY).upsert(batch, { onConflict: 'row_key', ignoreDuplicates: false })
+    if (error) failedBatches.push({ batchStart: i, batchSize: batch.length, message: error.message })
+    processed += batch.length
+    onProgress?.(Math.round((processed / totalRows) * 100))
+  }
+
+  const { count: countAfter } = await sb.from(TABLE_DAILY).select('id', { count: 'exact', head: true }).eq('shop_name', shopName)
+  const insertedRows = Math.max(0, (countAfter ?? 0) - (countBefore ?? 0))
+  const errorRows = failedBatches.reduce((sum, b) => sum + b.batchSize, 0)
+  const updatedRows = Math.max(0, totalRows - insertedRows - errorRows)
+  const status = failedBatches.length === 0 ? 'success' : (insertedRows + updatedRows > 0 ? 'partial' : 'failed')
+  const errorMessage = failedBatches.length ? failedBatches[0].message : null
+
+  await sb.from('upload_history').update({
+    inserted_rows: insertedRows, updated_rows: updatedRows, error_rows: errorRows,
+    status, error_detail: failedBatches.length ? { failedBatches } : null, finished_at: new Date().toISOString()
+  }).eq('id', historyRow.id)
+
+  return { insertedRows, updatedRows, errorRows, status, errorMessage }
+}
+
+/** Gop cac dong (nhieu campaign/tu khoa) ve 1 dong TONG cho moi ngay that */
+function computeDailyActual(rows) {
+  const impressions = sumBy(rows, 'so_luot_xem')
+  const clicks = sumBy(rows, 'so_luot_click')
+  const orders = sumBy(rows, 'san_pham_da_ban')
+  const revenue = sumBy(rows, 'doanh_so')
+  const cost = sumBy(rows, 'chi_phi')
+  const atc = sumBy(rows, 'add_to_cart')
+  return {
+    impressions, clicks, orders, revenue, cost, atc,
+    cpc: clicks > 0 ? cost / clicks : 0,
+    ctr: impressions > 0 ? clicks / impressions : 0, // ty le (0-1), NHAN 100 khi hien thi
+    cr: clicks > 0 ? orders / clicks : 0,             // ty le (0-1) - tinh theo DON HANG (khop dinh nghia CR ben Ke hoach thang)
+    cpa: orders > 0 ? cost / orders : 0,
+    roas: cost > 0 ? revenue / cost : 0,
+    acos: revenue > 0 ? (cost / revenue) * 100 : 0
+  }
+}
+
+function groupAdsDailyByDay(rows) {
+  const map = new Map()
+  rows.forEach((r) => {
+    const key = r.report_date || `${r.nam}-${pad2(r.thang)}-${pad2(r.ngay)}`
+    if (!map.has(key)) map.set(key, [])
+    map.get(key).push(r)
+  })
+  return Array.from(map.entries())
+    .map(([date, groupRows]) => ({ date, ...computeDailyActual(groupRows) }))
+    .sort((a, b) => (a.date > b.date ? 1 : -1))
+}
+
+/** Loi khuyen tu dong theo chuan nganh (BENCHMARKS) + so sanh voi ngay lien truoc */
+function aaDailyAdvice(cur, prev) {
+  const parts = []
+  if (evalBenchmark('roas', cur.roas).label === 'Cần cải thiện') parts.push('ROAS thấp — cân nhắc loại bớt từ khóa/vị trí kém hiệu quả')
+  if (evalBenchmark('ctr', cur.ctr * 100).label === 'Thấp') parts.push('CTR thấp — xem lại hình ảnh/tiêu đề quảng cáo')
+  if (evalBenchmark('cvr', cur.cr * 100).label === 'Thấp') parts.push('Tỷ lệ chuyển đổi thấp — kiểm tra giá bán/trang sản phẩm')
+  if (prev) {
+    const dRoas = pctChange(prev.roas, cur.roas)
+    if (dRoas !== null && dRoas < -15) parts.push(`ROAS giảm mạnh ${Math.abs(dRoas).toFixed(0)}% so với ngày trước`)
+    const dCost = pctChange(prev.cost, cur.cost)
+    if (dCost !== null && dCost > 30 && (dRoas === null || dRoas <= 0)) parts.push('Ngân sách tăng nhưng hiệu quả chưa tăng tương ứng')
+  }
+  return parts.length ? parts.join('; ') + '.' : 'Ổn định — tiếp tục theo dõi.'
+}
+
+let adsAnalysisInitialized = false
+let aaState = { file: null, parseResult: null, rawRows: [], roasRefMap: {}, plan: null, planResult: null, shopName: 'Default Shop', thang: null, nam: null }
+let aaCharts = {}
+
+function adsAnalysisSkeletonHTML() {
+  return `
+  <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <h3 class="text-sm font-semibold mb-1">Upload Báo cáo Ads theo ngày</h3>
+    <p class="text-xs text-gray-400 mb-4">File dạng "Data ad ThángX.xlsx" — cùng định dạng báo cáo Chiến dịch/Từ khóa-Vị trí Shopee, có thêm cột <b>Ngày</b> ở đầu để lưu đúng ngày phát sinh số liệu. Mỗi tháng chỉ cần dán thêm dữ liệu mới xuống dưới file gốc rồi Upload lại — hệ thống tự thêm mới/không trùng lặp.</p>
+
+    <div class="mb-4 max-w-xs">
+      <label class="mb-1 block text-xs font-medium text-gray-400">Shop</label>
+      <input id="aa_shopName" value="Default Shop" class="w-full rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800" />
+    </div>
+
+    <div id="aa_dropzone" class="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-700 p-10 text-center">
+      <div class="mb-3 text-4xl">📈</div>
+      <p class="text-sm font-medium">Kéo & thả file báo cáo Ads theo ngày (.xlsx/.csv) vào đây</p>
+      <p class="mt-1 text-xs text-gray-400">hoặc bấm để chọn file</p>
+      <input id="aa_fileInput" type="file" accept=".xlsx,.xls,.csv" class="hidden-important" />
+    </div>
+
+    <div id="aa_parsing" class="hidden-important mt-4"></div>
+    <div id="aa_review" class="hidden-important mt-4 flex flex-col gap-4"></div>
+    <div id="aa_syncing" class="hidden-important mt-4"></div>
+    <div id="aa_done" class="hidden-important mt-4 flex flex-col gap-4"></div>
+  </div>
+
+  <div class="card flex flex-wrap items-end gap-3 p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <div><label class="mb-1 block text-xs font-medium text-gray-400">Tháng</label>
+      <input id="aa_thang" type="number" min="1" max="12" class="w-20 rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></div>
+    <div><label class="mb-1 block text-xs font-medium text-gray-400">Năm</label>
+      <input id="aa_nam" type="number" class="w-24 rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></div>
+    <button id="aa_refreshBtn" class="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white hover:bg-brand-600">🔄 Xem phân tích</button>
+  </div>
+
+  <div id="aa_summary"></div>
+
+  <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <h3 class="text-sm font-semibold mb-3">Xu hướng theo ngày</h3>
+    <canvas id="aa_chartTrend" height="90"></canvas>
+  </div>
+
+  <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <h3 class="text-sm font-semibold mb-1">Bảng so sánh hiệu quả Ads giữa các ngày</h3>
+    <p class="text-xs text-gray-400 mb-3">Đối chiếu từng ngày với ngày liền trước, kèm đánh giá/lời khuyên tự động dựa trên chuẩn ngành.</p>
+    <div id="aa_dailyTable" class="overflow-x-auto"></div>
+  </div>
+
+  <div id="aa_detail" class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <h3 class="text-sm font-semibold mb-1">Kế hoạch vs Thực tế theo ngày</h3>
+    <p class="text-xs text-gray-400 mb-3">Nhập <b>ROAS tham chiếu</b> cho 1 ngày để tính ra kịch bản kỳ vọng (CPC/CTR/CR/ATC/CPA/Đơn/GMV) trên đúng Ngân sách đã chi thực tế ngày đó, so với số liệu Thực tế đạt được. Cần có Kế hoạch tháng đã lưu (mục "📅 Kế hoạch tháng") cho cùng Shop/Tháng/Năm.</p>
+    <div id="aa_planVsActual" class="overflow-x-auto"></div>
+  </div>`
+}
+
+function initAdsAnalysisPage() {
+  adsAnalysisInitialized = true
+  const container = document.getElementById('page-adsanalysis')
+  container.innerHTML = adsAnalysisSkeletonHTML()
+
+  const dropzone = document.getElementById('aa_dropzone')
+  const fileInput = document.getElementById('aa_fileInput')
+  dropzone.addEventListener('click', () => fileInput.click())
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('border-brand', 'bg-brand-50') })
+  dropzone.addEventListener('dragleave', () => dropzone.classList.remove('border-brand', 'bg-brand-50'))
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault()
+    dropzone.classList.remove('border-brand', 'bg-brand-50')
+    handleAaFileSelected(e.dataTransfer.files?.[0])
+  })
+  fileInput.addEventListener('change', (e) => handleAaFileSelected(e.target.files?.[0]))
+
+  document.getElementById('aa_refreshBtn').addEventListener('click', loadAdsAnalysisData)
+  document.getElementById('aa_detail').addEventListener('change', handleAaFieldChange)
+
+  const now = new Date()
+  document.getElementById('aa_thang').value = now.getMonth() + 1
+  document.getElementById('aa_nam').value = now.getFullYear()
+
+  loadAdsAnalysisData()
+}
+
+async function handleAaFileSelected(file) {
+  if (!file) return
+  if (!/\.(xlsx|xls|csv)$/i.test(file.name)) { alert('Chỉ hỗ trợ file .xlsx, .xls hoặc .csv'); return }
+
+  aaState.file = file
+  showAaStep('parsing')
+  document.getElementById('aa_parsing').innerHTML = progressBarHTML(40, `Đang đọc file ${file.name}...`)
+
+  try {
+    const shopName = document.getElementById('aa_shopName').value || 'Default Shop'
+    const result = await parseAdsDailyFile(file, shopName)
+    aaState.parseResult = result
+    renderAaReview(result)
+    showAaStep('review')
+  } catch (err) {
+    alert('Lỗi đọc file: ' + err.message)
+    showAaStep('idle')
+  }
+}
+
+function showAaStep(step) {
+  ;['parsing', 'review', 'syncing', 'done'].forEach((s) => document.getElementById(`aa_${s}`).classList.add('hidden-important'))
+  if (step !== 'idle') document.getElementById(`aa_${step}`).classList.remove('hidden-important')
+}
+
+function renderAaReview(result) {
+  const hasIssue = result.missingColumns.length > 0 || result.errors.length > 0
+  let html
+  if (!hasIssue) {
+    html = `<div class="rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">
+      ✅ Định dạng hợp lệ — ${result.totalDataRows} dòng dữ liệu, ${result.rows.length} dòng sẵn sàng để đồng bộ.
+    </div>`
+  } else {
+    html = `<div class="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
+      <p class="mb-2 font-semibold">⚠️ Phát hiện lỗi định dạng dữ liệu:</p>
+      ${result.missingColumns.length ? `<div class="mb-2"><p class="font-medium">Thiếu cột bắt buộc:</p><ul class="ml-4 list-disc">${result.missingColumns.map((c) => `<li>${escapeHtml(c)}</li>`).join('')}</ul></div>` : ''}
+      ${result.errors.length ? `<div><p class="font-medium">Lỗi dữ liệu (${result.errors.length} dòng):</p>
+        <ul class="ml-4 max-h-40 list-disc overflow-y-auto">${result.errors.slice(0, 30).map((e) => `<li>Dòng ${e.row}: ${escapeHtml(e.message)}</li>`).join('')}</ul>
+        ${result.errors.length > 30 ? `<p class="mt-1 italic">... và ${result.errors.length - 30} lỗi khác</p>` : ''}</div>` : ''}
+    </div>`
+  }
+
+  html += `<div class="flex gap-3">
+    <button id="aa_confirmBtn" class="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white hover:bg-brand-600 disabled:opacity-40" ${(!result.headerValid || result.rows.length === 0) ? 'disabled' : ''}>
+      Đồng bộ ${result.rows.length} dòng lên Supabase
+    </button>
+    <button id="aa_resetBtn" class="rounded-lg border px-4 py-2 text-sm border-gray-300 dark:border-gray-700">Chọn file khác</button>
+  </div>`
+
+  document.getElementById('aa_review').innerHTML = html
+  document.getElementById('aa_confirmBtn')?.addEventListener('click', handleAaConfirmSync)
+  document.getElementById('aa_resetBtn').addEventListener('click', resetAaUpload)
+}
+
+async function handleAaConfirmSync() {
+  const result = aaState.parseResult
+  if (!result?.rows?.length) return
+  showAaStep('syncing')
+  document.getElementById('aa_syncing').innerHTML = progressBarHTML(0, 'Đang đồng bộ dữ liệu lên Supabase...')
+
+  try {
+    const shopName = document.getElementById('aa_shopName').value || 'Default Shop'
+    const syncResult = await syncAdsDailyToSupabase(result.rows, {
+      fileName: aaState.file.name,
+      shopName,
+      userId: currentSession?.user?.id,
+      onProgress: (p) => { document.getElementById('aa_syncing').innerHTML = progressBarHTML(p, 'Đang đồng bộ dữ liệu lên Supabase...') }
+    })
+    const isOk = syncResult.status === 'success'
+    const boxColor = isOk ? 'bg-green-50 text-green-700' : (syncResult.insertedRows + syncResult.updatedRows > 0 ? 'bg-yellow-50 text-yellow-700' : 'bg-red-50 text-red-700')
+    const icon = isOk ? '✅' : '⚠️'
+    document.getElementById('aa_done').innerHTML = `
+      <div class="rounded-lg ${boxColor} px-4 py-3 text-sm">
+        ${icon} Thêm mới: <b>${syncResult.insertedRows}</b> dòng · Cập nhật: <b>${syncResult.updatedRows}</b> dòng
+        ${syncResult.errorRows > 0 ? ` · <b class="text-red-600">Lỗi/không ghi được: ${syncResult.errorRows} dòng</b>` : ''}
+        ${syncResult.errorMessage ? `<div class="mt-2 rounded bg-white/60 dark:bg-black/20 px-2 py-1.5 font-mono text-xs break-all">Chi tiết lỗi Supabase: ${escapeHtml(syncResult.errorMessage)}</div>` : ''}
+      </div>
+      <button id="aa_afterDoneBtn" class="w-fit rounded-lg border px-4 py-2 text-sm border-gray-300 dark:border-gray-700">Upload file khác</button>`
+    document.getElementById('aa_afterDoneBtn').addEventListener('click', resetAaUpload)
+    showAaStep('done')
+    loadAdsAnalysisData()
+  } catch (err) {
+    alert('Lỗi đồng bộ Supabase: ' + err.message)
+    showAaStep('review')
+  }
+}
+
+function resetAaUpload() {
+  aaState.file = null; aaState.parseResult = null
+  document.getElementById('aa_fileInput').value = ''
+  showAaStep('idle')
+}
+
+async function loadAdsAnalysisData() {
+  const shopName = document.getElementById('aa_shopName')?.value || 'Default Shop'
+  const thang = Number(document.getElementById('aa_thang').value) || (new Date().getMonth() + 1)
+  const nam = Number(document.getElementById('aa_nam').value) || new Date().getFullYear()
+  aaState.shopName = shopName; aaState.thang = thang; aaState.nam = nam
+
+  document.getElementById('aa_summary').innerHTML = '<p class="text-sm text-gray-400">Đang tải dữ liệu...</p>'
+
+  try {
+    const { data: dailyRows, error: dailyErr } = await sb.from('ads_daily_reports').select('*')
+      .eq('shop_name', shopName).eq('thang', thang).eq('nam', nam).order('ngay', { ascending: true }).limit(20000)
+    if (dailyErr) throw dailyErr
+    aaState.rawRows = dailyRows || []
+
+    const monthStart = `${nam}-${pad2(thang)}-01`
+    const monthEnd = toISODate(new Date(nam, thang, 0))
+    const { data: refRows, error: refErr } = await sb.from('ads_daily_roas_ref').select('*')
+      .eq('shop_name', shopName).gte('report_date', monthStart).lte('report_date', monthEnd)
+    aaState.roasRefMap = {}
+    if (!refErr) (refRows || []).forEach((r) => { aaState.roasRefMap[r.report_date] = r.roas_ref })
+
+    const { data: planRow } = await sb.from('media_plans').select('*')
+      .eq('shop_name', shopName).eq('thang', thang).eq('nam', nam).maybeSingle()
+    aaState.plan = planRow || null
+    aaState.planResult = (planRow && planRow.assumptions && planRow.daily_plan) ? computePlan(planRow.assumptions, planRow.daily_plan) : null
+
+    renderAdsAnalysis()
+  } catch (err) {
+    document.getElementById('aa_summary').innerHTML = `<p class="text-sm text-red-500">Lỗi tải dữ liệu: ${escapeHtml(err.message)}</p>`
+  }
+}
+
+function aaKpiCardsHTML(kpi) {
+  const defs = [
+    { key: 'revenue', label: 'Doanh thu', fmt: formatVND },
+    { key: 'cost', label: 'Chi phí Ads', fmt: formatVND },
+    { key: 'roas', label: 'ROAS', fmt: (v) => v.toFixed(2) + 'x' },
+    { key: 'acos', label: 'ACOS', fmt: formatPercent },
+    { key: 'ctr', label: 'CTR', fmt: formatPercent },
+    { key: 'cvr', label: 'CVR', fmt: formatPercent },
+    { key: 'cpc', label: 'CPC', fmt: formatVND },
+    { key: 'cpa', label: 'CPA', fmt: formatVND },
+    { key: 'orders', label: 'Đơn hàng', fmt: formatNumber },
+    { key: 'clicks', label: 'Click', fmt: formatNumber }
+  ]
+  return `<div class="grid grid-cols-2 gap-3 sm:grid-cols-5">${defs.map((d) => `
+    <div class="card p-3 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <p class="text-xs text-gray-400">${d.label}</p>
+      <p class="mt-1 text-lg font-bold">${d.fmt(kpi[d.key])}</p>
+    </div>`).join('')}</div>`
+}
+
+function renderAaTrendChart(dailyRows) {
+  const labels = dailyRows.map((d) => { const [, m, dd] = d.date.split('-'); return `${dd}/${m}` })
+  if (aaCharts.trend) { aaCharts.trend.destroy(); delete aaCharts.trend }
+  aaCharts.trend = new Chart(document.getElementById('aa_chartTrend'), {
+    type: 'line',
+    data: { labels, datasets: [
+      { label: 'Chi phí', data: dailyRows.map((d) => d.cost), borderColor: '#3B82F6', backgroundColor: '#3B82F6', tension: 0.3, yAxisID: 'y' },
+      { label: 'Doanh số', data: dailyRows.map((d) => d.revenue), borderColor: '#EE4D2D', backgroundColor: '#EE4D2D', tension: 0.3, yAxisID: 'y' },
+      { label: 'ROAS (x)', data: dailyRows.map((d) => d.roas), borderColor: '#10B981', backgroundColor: '#10B981', tension: 0.3, yAxisID: 'y1' }
+    ] },
+    options: {
+      responsive: true, plugins: { legend: { position: 'bottom' } },
+      scales: {
+        y: { position: 'left', title: { display: true, text: 'đ' } },
+        y1: { position: 'right', title: { display: true, text: 'ROAS (x)' }, grid: { drawOnChartArea: false } }
+      }
+    }
+  })
+}
+
+function aaDailyTableHTML(dailyRows) {
+  if (!dailyRows.length) return '<p class="text-sm text-gray-400">Chưa có dữ liệu ngày nào cho Shop/Tháng/Năm đã chọn. Hãy Upload file báo cáo theo ngày ở trên.</p>'
+  return `<table class="w-full text-left text-sm">
+    <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+      <th class="py-2 pr-3 font-medium text-gray-400">Ngày</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Chi phí</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Doanh số</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">ROAS</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Δ ROAS</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">ACOS</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">CTR</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">CR</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">CPC</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">CPA</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Đơn hàng</th>
+      <th class="py-2 pr-3 font-medium text-gray-400 min-w-[240px]">Đánh giá tự động</th>
+    </tr></thead>
+    <tbody>${dailyRows.map((d, i) => {
+      const prev = i > 0 ? dailyRows[i - 1] : null
+      const dRoas = prev ? pctChange(prev.roas, d.roas) : null
+      const [y, m, dd] = d.date.split('-')
+      return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+        <td class="py-1.5 pr-3 whitespace-nowrap font-medium">${dd}/${m}/${y}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(d.cost)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(d.revenue)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${d.roas.toFixed(2)}x</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap ${dRoas === null ? 'text-gray-400' : dRoas >= 0 ? 'text-green-600' : 'text-red-500'}">${dRoas === null ? '—' : (dRoas >= 0 ? '+' : '') + dRoas.toFixed(1) + '%'}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${formatPercent(d.acos)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${formatPercent(d.ctr * 100)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${formatPercent(d.cr * 100)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(d.cpc)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(d.cpa)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${formatNumber(d.orders)}</td>
+        <td class="py-1.5 pr-3 text-xs text-gray-600 dark:text-gray-300">${escapeHtml(aaDailyAdvice(d, prev))}</td>
+      </tr>`
+    }).join('')}</tbody></table>`
+}
+
+function aaPlanVsActualTableHTML(dailyRows) {
+  if (!aaState.planResult) {
+    return `<p class="text-sm text-gray-400">Chưa có Kế hoạch tháng nào được lưu cho Shop "${escapeHtml(aaState.shopName)}" — Tháng ${pad2(aaState.thang)}/${aaState.nam}. Hãy Upload Kế hoạch tháng tương ứng ở mục "📅 Kế hoạch tháng" để so sánh.</p>`
+  }
+  if (!dailyRows.length) return '<p class="text-sm text-gray-400">Chưa có dữ liệu thực tế theo ngày để đối chiếu.</p>'
+
+  const planByDate = {}
+  aaState.planResult.rows.forEach((r) => { planByDate[r.date] = r })
+
+  return `<table class="w-full text-left text-sm">
+    <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+      <th class="py-2 pr-3 font-medium text-gray-400">Ngày</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Giai đoạn</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Ngân sách thực chi</th>
+      <th class="py-2 pr-3 font-medium text-gray-400 min-w-[100px]">ROAS tham chiếu</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">ROAS thực tế</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">CPC (T.chiếu / T.tế)</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">CTR (T.chiếu / T.tế)</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">CR (T.chiếu / T.tế)</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">ATC (T.chiếu / T.tế)</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">CPA (T.chiếu / T.tế)</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Đơn (T.chiếu / T.tế)</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">GMV (T.chiếu / T.tế)</th>
+    </tr></thead>
+    <tbody>${dailyRows.map((d) => {
+      const planDay = planByDate[d.date]
+      const [y, m, dd] = d.date.split('-')
+      const roasRef = aaState.roasRefMap[d.date]
+      let refCalc = null
+      if (planDay && roasRef !== null && roasRef !== undefined && roasRef !== '' && d.cost > 0) {
+        const cpcRef = planDay.blendedCpc, ctrRef = planDay.blendedCtr, atcRateRef = planDay.blendedAtc
+        const aovRef = planDay.totalOrder > 0 ? planDay.totalGMV / planDay.totalOrder : 0
+        const crRef = (cpcRef > 0 && aovRef > 0) ? (Number(roasRef) * cpcRef / aovRef) : 0
+        const clickRef = cpcRef > 0 ? d.cost / cpcRef : 0
+        const orderRef = clickRef * crRef
+        const gmvRef = orderRef * aovRef
+        const atcRef = clickRef * atcRateRef
+        const cpaRef = orderRef > 0 ? d.cost / orderRef : 0
+        refCalc = { cpcRef, ctrRef, crRef, atcRef, cpaRef, orderRef, gmvRef }
+      }
+      const fmt2 = (refVal, actVal, fmtFn) => `<span class="text-gray-400">${refCalc ? fmtFn(refVal) : '—'}</span> / <span class="font-medium">${fmtFn(actVal)}</span>`
+      return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+        <td class="py-1.5 pr-3 whitespace-nowrap font-medium">${dd}/${m}/${y}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${planDay ? `<span class="rounded px-1.5 py-0.5 text-xs ${MP_PHASE_BADGE[planDay.phase] || ''}">${planDay.phase}</span>` : '<span class="text-gray-400">—</span>'}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(d.cost)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap"><input type="number" step="0.1" data-aa="roas-ref" data-date="${d.date}" value="${roasRef ?? ''}" placeholder="vd 8" class="w-20 rounded border px-2 py-1 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></td>
+        <td class="py-1.5 pr-3 whitespace-nowrap font-medium">${d.roas.toFixed(2)}x</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2(refCalc?.cpcRef, d.cpc, formatVND)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2((refCalc?.ctrRef || 0) * 100, d.ctr * 100, formatPercent)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2((refCalc?.crRef || 0) * 100, d.cr * 100, formatPercent)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2(refCalc?.atcRef, d.atc, formatNumber)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2(refCalc?.cpaRef, d.cpa, formatVND)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2(refCalc?.orderRef, d.orders, formatNumber)}</td>
+        <td class="py-1.5 pr-3 whitespace-nowrap text-xs">${fmt2(refCalc?.gmvRef, d.revenue, formatVND)}</td>
+      </tr>`
+    }).join('')}</tbody></table>
+  <p class="mt-2 text-xs text-gray-400">Cột "T.chiếu / T.tế" = giá trị Tham chiếu (tính từ ô ROAS tham chiếu, giữ CPC/CTR/ATC/AOV theo chuẩn Giai đoạn trong Kế hoạch, áp trên đúng Ngân sách thực chi ngày đó) / giá trị Thực tế đã đạt. Bỏ trống ô ROAS tham chiếu để ẩn cột Tham chiếu (hiện "—").</p>`
+}
+
+async function handleAaFieldChange(e) {
+  const el = e.target
+  if (el.dataset.aa !== 'roas-ref') return
+  const date = el.dataset.date
+  const raw = el.value.trim()
+  const value = raw === '' ? null : Number(raw)
+  aaState.roasRefMap[date] = value
+  try {
+    if (value === null) {
+      await sb.from('ads_daily_roas_ref').delete().eq('shop_name', aaState.shopName).eq('report_date', date)
+    } else {
+      await sb.from('ads_daily_roas_ref').upsert({ shop_name: aaState.shopName, report_date: date, roas_ref: value }, { onConflict: 'shop_name,report_date' })
+    }
+  } catch (err) {
+    alert('Lỗi lưu ROAS tham chiếu: ' + err.message)
+  }
+  renderAdsAnalysis()
+}
+
+function renderAdsAnalysis() {
+  const rows = aaState.rawRows
+  const kpi = computeKpis(rows)
+  document.getElementById('aa_summary').innerHTML = aaKpiCardsHTML(kpi)
+
+  const dailyRows = groupAdsDailyByDay(rows)
+  renderAaTrendChart(dailyRows)
+  document.getElementById('aa_dailyTable').innerHTML = aaDailyTableHTML(dailyRows)
+  document.getElementById('aa_planVsActual').innerHTML = aaPlanVsActualTableHTML(dailyRows)
 }
 
 /* -----------------------------------------------------------------------
