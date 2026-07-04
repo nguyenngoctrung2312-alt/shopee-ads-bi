@@ -1613,6 +1613,28 @@ function applyDayProductRatioOverride(mpEditRef, dayIdx, prodIdx, newRatio) {
   day.productRatioOverride = next
 }
 
+/** Giong applyDayProductRatioOverride nhung AP DUNG DONG LOAT cho TAT CA cac
+ * ngay trong thang cung luc (vd doi nhanh ty le mac dinh 60/40 thanh 70/30
+ * cho ca thang, thay vi phai sua tung ngay mot). Diem xuat phat de chia lai
+ * phan con lai la Ty le MAC DINH (theo Ngan sach thang), khong phai ty le
+ * dang override rieng cua tung ngay - dung nhu "dat lai tu dau roi ap dung
+ * ty le moi cho ca thang". Sau khi ap dung, tung ngay van sua rieng lai
+ * duoc binh thuong (data-mp="day-product-ratio" trong tung dong). */
+function applyGlobalProductRatioOverride(mpEditRef, prodIdx, newRatio) {
+  const products = mpEditRef.assumptions.products
+  const n = products.length
+  if (n < 2) return
+  const defaults = defaultDayProductRatios(mpEditRef.assumptions)
+  const clamped = Math.min(Math.max(newRatio, 0), 1)
+  const remaining = 1 - clamped
+  const othersSum = defaults.reduce((s, v, i) => (i === prodIdx ? s : s + v), 0)
+  const next = defaults.map((v, i) => {
+    if (i === prodIdx) return clamped
+    return othersSum > 0 ? (v / othersSum) * remaining : remaining / (n - 1)
+  })
+  mpEditRef.dailyPlan.forEach((d) => { d.productRatioOverride = next.slice() })
+}
+
 function buildPlanSummaryFields(assumptions, dailyPlan) {
   const plan = computePlan(assumptions, dailyPlan)
   const totalClick = plan.monthTotal.click
@@ -2241,8 +2263,18 @@ function mpPhaseSummaryTableHTML(phaseSummary) {
   <p class="mt-2 text-[11px] text-gray-400">Sửa % Ngân sách của 1 Giai đoạn sẽ tự động chia lại Trọng số các ngày trong giai đoạn đó (giữ nguyên tỷ lệ giữa các ngày với nhau, giữ nguyên Trọng số các giai đoạn khác) để ngân sách khớp đúng %. Tổng % của các giai đoạn luôn = 100%.</p>`
 }
 
-function mpDailyTableHTML(planResult) {
-  const productCols = (planResult.rows[0]?.perProduct || []).map((p) => `<th class="py-2 pr-2 font-medium text-gray-400 whitespace-nowrap">Tỉ lệ / NS ${escapeHtml(p.name.split(' ')[0])}</th>`).join('')
+function mpDailyTableHTML(planResult, assumptions) {
+  // Ty le % mac dinh (theo Ngan sach thang tung san pham) - dung lam gia tri
+  // hien thi ban dau cho o "Ty le ap dung ca thang" tren tieu de cot, va lam
+  // diem xuat phat khi nguoi dung sua o nay (ap dung dong loat cho MOI ngay).
+  const defaultRatios = defaultDayProductRatios(assumptions)
+  const productCols = (planResult.rows[0]?.perProduct || []).map((p, pIdx) => `<th class="py-2 pr-2 font-medium text-gray-400 whitespace-nowrap align-bottom">
+    <div>Tỉ lệ / NS ${escapeHtml(p.name.split(' ')[0])}</div>
+    <div class="mt-1 flex items-center gap-1 font-normal normal-case">
+      <input type="number" step="0.1" min="0" max="100" data-mp="global-product-ratio" data-pidx="${pIdx}" value="${(defaultRatios[pIdx] * 100).toFixed(1)}" class="w-14 rounded border px-1 py-0.5 text-[11px] border-gray-300 dark:border-gray-700 dark:bg-gray-800" title="Áp dụng tỉ lệ % này cho TẤT CẢ các ngày trong tháng (từng ngày vẫn sửa riêng lại được sau đó)" />%
+      ${pIdx === 0 ? `<button type="button" data-mp-action="reset-all-day-ratios" class="text-[10px] text-gray-400 hover:text-gray-600" title="Đặt lại tỉ lệ tự động (theo Ngân sách tháng) cho TẤT CẢ các ngày">↺ tất cả</button>` : ''}
+    </div>
+  </th>`).join('')
 
   const rows = planResult.rows.map((r, idx) => {
     const [y, mo, da] = r.date.split('-')
@@ -2396,6 +2428,8 @@ function handleMpFieldChange(e) {
     applyDayBudgetOverride(mpEdit, +el.dataset.idx, toFloatOrZero(val))
   } else if (kind === 'day-product-ratio') {
     applyDayProductRatioOverride(mpEdit, +el.dataset.idx, +el.dataset.pidx, toFloatOrZero(val) / 100)
+  } else if (kind === 'global-product-ratio') {
+    applyGlobalProductRatioOverride(mpEdit, +el.dataset.pidx, toFloatOrZero(val) / 100)
   } else if (kind === 'phase-budget-pct') {
     applyPhaseBudgetPctOverride(mpEdit, el.dataset.phase, toFloatOrZero(val) / 100)
   } else if (kind === 'day-note') {
@@ -2436,6 +2470,8 @@ function handleMpDetailClick(e) {
     mpEdit.dailyPlan[+el.dataset.idx].weightOverride = null
   } else if (action === 'reset-day-ratio') {
     mpEdit.dailyPlan[+el.dataset.idx].productRatioOverride = null
+  } else if (action === 'reset-all-day-ratios') {
+    mpEdit.dailyPlan.forEach((d) => { d.productRatioOverride = null })
   } else if (action === 'reset-phase-multipliers') {
     if (!confirm('Đặt lại Hệ số nhân theo Giai đoạn về mặc định chuẩn ngành? (Sale CPC×1.2/CTR×1.35/CR×1.6/ATC×1.45, Pre-heat và Sustain tương ứng, Normal ×1)')) return
     mpEdit.assumptions.phaseMultipliers = JSON.parse(JSON.stringify(MP_DEFAULT_ASSUMPTIONS.phaseMultipliers))
@@ -2587,7 +2623,7 @@ function renderMediaPlanDetail(preserveScroll) {
       <h3 class="text-sm font-semibold mb-1">Phân bổ Ngân sách 31 ngày (chỉnh sửa được)</h3>
       <p class="text-xs text-gray-400 mb-1">Đổi <b>Giai đoạn</b> mỗi ngày (Sale/Pre-heat/Sustain/Normal), sửa <b>Trọng số</b> riêng từng ngày, hoặc sửa <b>Ghi chú chiến lược</b>. Ngân sách/GMV/Đơn hàng/ROAS mỗi ngày tự tính theo Trọng số; sửa Trọng số ngày này sẽ tự chia lại tỷ lệ ngân sách các ngày khác — <b>Tổng ngân sách luôn giữ nguyên</b> bằng đúng Ngân sách tháng đã cấu hình.</p>
       <p class="mb-3 text-sm">💰 Tổng ngân sách hiện tại: <b class="text-base">${formatVND(planResult.monthTotal.budget)}</b></p>
-      ${mpDailyTableHTML(planResult)}
+      ${mpDailyTableHTML(planResult, assumptions)}
     </div>
 
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
