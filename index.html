@@ -1359,16 +1359,45 @@ function computePlan(assumptions, dailyPlan) {
   const totalWeight = days.reduce((s, d) => s + d.weight, 0)
   const unitPerWeight = products.map((p) => (totalWeight > 0 ? p.budgetMonthly / totalWeight : 0))
 
+  // Buoc 0: "ROAS muc tieu theo Giai doan" (tuy chon, assumptions.roasTargetByPhase[phase]).
+  // ROAS ty le THUAN voi CR khi CPC/AOV/Ngan sach khong doi (ROAS=Click*CR*AOV/Ngan
+  // sach), nen chi can tinh ROAS "goc" cua giai doan do (voi CR chuan x He so
+  // Giai doan, chua dieu chinh) roi suy ra 1 he so nhan THEM vao CR
+  // (crAdjust = ROAS_muc_tieu / ROAS_goc) de danh dung ROAS mong muon, khong
+  // dong tac dong CPC/CTR/AOV.
+  const roasTargetByPhase = assumptions.roasTargetByPhase || {}
+  const crAdjustByPhase = {}
+  MP_PHASES.forEach((phase) => {
+    const target = roasTargetByPhase[phase]
+    if (target === null || target === undefined || !isFinite(target) || target <= 0) { crAdjustByPhase[phase] = 1; return }
+    const mult = assumptions.phaseMultipliers[phase] || { cpc: 1, ctr: 1, cr: 1, atc: 1 }
+    let sumBudget = 0, sumGmv = 0
+    days.forEach((d) => {
+      if (d.phase !== phase) return
+      products.forEach((p, idx) => {
+        const budget = Math.round((d.weight * unitPerWeight[idx]) / 1000) * 1000
+        const cpc = p.cpc * mult.cpc
+        const cr = p.cr * mult.cr
+        const click = cpc > 0 ? budget / cpc : 0
+        sumBudget += budget
+        sumGmv += click * cr * p.aov
+      })
+    })
+    const baseRoas = sumBudget > 0 ? sumGmv / sumBudget : 0
+    crAdjustByPhase[phase] = baseRoas > 0 ? target / baseRoas : 1
+  })
+
   // Buoc 1: tinh Ngan sach/ngay x san pham, LAM TRON ve hang nghin (dung
   // cong thuc ROUND cua file goc) - lam tron tung ngay nhu the nay ve ban
   // chat se khien TONG CA THANG bi le vai nghin dong so voi Ngan sach da
   // nhap (vd 30.000.000 -> 30.007.000).
   const perDayProduct = days.map((d) => {
     const mult = assumptions.phaseMultipliers[d.phase] || { cpc: 1, ctr: 1, cr: 1, atc: 1 }
+    const crAdjust = crAdjustByPhase[d.phase] || 1
     return products.map((p, idx) => ({
       name: p.name,
       budget: Math.round((d.weight * unitPerWeight[idx]) / 1000) * 1000,
-      cpc: p.cpc * mult.cpc, ctr: p.ctr * mult.ctr, cr: p.cr * mult.cr, atc: p.atc * mult.atc, aov: p.aov
+      cpc: p.cpc * mult.cpc, ctr: p.ctr * mult.ctr, cr: p.cr * mult.cr * crAdjust, atc: p.atc * mult.atc, aov: p.aov
     }))
   })
 
@@ -1981,9 +2010,29 @@ function mpPhaseWeightsHTML(assumptions) {
   </div>`
 }
 
+function mpRoasTargetsHTML(assumptions) {
+  const targets = assumptions.roasTargetByPhase || {}
+  return `<div class="mt-3">
+    <p class="mb-1 text-xs font-medium text-gray-500">🎯 ROAS mục tiêu theo Giai đoạn (tùy chọn) — để trống thì ROAS tự tính từ CPC/CTR/CR/AOV ở trên; nhập số thì hệ thống tự điều chỉnh CR hiệu quả để đạt đúng ROAS này</p>
+    <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      ${MP_PHASES.map((ph) => `<label class="flex flex-col gap-1 text-xs">ROAS mục tiêu "${ph}"
+        <input type="number" step="0.1" placeholder="Tự động" data-mp="phase-roas-target" data-phase="${ph}" value="${targets[ph] !== null && targets[ph] !== undefined ? targets[ph] : ''}" class="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 dark:bg-gray-800" /></label>`).join('')}
+    </div>
+  </div>`
+}
+
 function mpPhaseMultHTML(assumptions) {
-  return `<details class="mt-3">
+  const m = assumptions.phaseMultipliers
+  const isDegenerate = ['Sale', 'Pre-heat', 'Sustain'].every((ph) => m[ph] && m[ph].cpc === 1 && m[ph].ctr === 1 && m[ph].cr === 1 && m[ph].atc === 1)
+  const warningHtml = isDegenerate
+    ? `<div class="mb-3 rounded-lg bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">⚠️ Hệ số nhân theo Giai đoạn đang bằng 1,0x ở mọi giai đoạn (Sale/Pre-heat/Sustain giống hệt Normal) — CPC/CTR/CR/ROAS các ngày sẽ không khác biệt theo giai đoạn. Mở mục "⚙️ Nâng cao" bên dưới và bấm "↺ Đặt lại mặc định" để khôi phục đúng hệ số chuẩn ngành.</div>`
+    : ''
+  return `${warningHtml}<details class="mt-3">
     <summary class="cursor-pointer text-xs font-medium text-gray-500">⚙️ Nâng cao — Hệ số nhân theo Giai đoạn (áp lên benchmark gốc ở trên)</summary>
+    <div class="mt-2 mb-1 flex flex-wrap items-center justify-between gap-2">
+      <p class="text-[11px] text-gray-400">Ngày Sale/Pre-heat/Sustain nên có hệ số &gt; 1 so với Normal để phản ánh CTR/CR tăng vào các dịp cao điểm.</p>
+      <button type="button" data-mp-action="reset-phase-multipliers" class="shrink-0 rounded border px-2 py-1 text-[11px] border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-white/5">↺ Đặt lại mặc định</button>
+    </div>
     <table class="mt-2 w-full text-left text-xs">
       <thead><tr class="border-b border-gray-200 dark:border-gray-800">
         <th class="py-1 pr-2 font-medium text-gray-400">Giai đoạn</th>
@@ -2231,6 +2280,9 @@ function handleMpFieldChange(e) {
     mpEdit.assumptions.weekendMultiplier = toFloatOrZero(val)
   } else if (kind === 'phase-mult') {
     mpEdit.assumptions.phaseMultipliers[el.dataset.phase][el.dataset.key] = toFloatOrZero(val)
+  } else if (kind === 'phase-roas-target') {
+    if (!mpEdit.assumptions.roasTargetByPhase) mpEdit.assumptions.roasTargetByPhase = {}
+    mpEdit.assumptions.roasTargetByPhase[el.dataset.phase] = val === '' ? null : toFloatOrZero(val)
   } else if (kind === 'day-phase') {
     mpEdit.dailyPlan[+el.dataset.idx].phase = val
   } else if (kind === 'day-weight') {
@@ -2273,6 +2325,9 @@ function handleMpDetailClick(e) {
     mpEdit.hourlyPlan.normalRepBudget = null
   } else if (action === 'reset-day-weight') {
     mpEdit.dailyPlan[+el.dataset.idx].weightOverride = null
+  } else if (action === 'reset-phase-multipliers') {
+    if (!confirm('Đặt lại Hệ số nhân theo Giai đoạn về mặc định chuẩn ngành? (Sale CPC×1.2/CTR×1.35/CR×1.6/ATC×1.45, Pre-heat và Sustain tương ứng, Normal ×1)')) return
+    mpEdit.assumptions.phaseMultipliers = JSON.parse(JSON.stringify(MP_DEFAULT_ASSUMPTIONS.phaseMultipliers))
   } else if (action === 'add-product') {
     const n = mpEdit.assumptions.products.length + 1
     mpEdit.assumptions.products.push({ name: `Sản phẩm ${n}`, budgetMonthly: 0, cpc: 0, ctr: 0, cr: 0, atc: 0, aov: 0 })
@@ -2395,6 +2450,7 @@ function renderMediaPlanDetail(preserveScroll) {
       </div>
       <button type="button" data-mp-action="add-product" class="mb-4 rounded-lg border px-3 py-1.5 text-xs font-medium border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-white/5">+ Thêm sản phẩm</button>
       ${mpPhaseWeightsHTML(assumptions)}
+      ${mpRoasTargetsHTML(assumptions)}
       ${mpPhaseMultHTML(assumptions)}
       ${mpIndustryBenchmarkHTML()}
     </div>
