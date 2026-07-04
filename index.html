@@ -582,6 +582,28 @@ function dashboardSkeletonHTML() {
         <div id="topProductTable" class="overflow-x-auto"></div>
       </div>
     </div>
+
+    <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <h3 class="text-sm font-semibold mb-1">So sánh hiệu quả theo Kỳ</h3>
+      <p class="text-xs text-gray-400 mb-3">Đối chiếu số liệu giữa 3 kỳ liên tiếp (theo bộ lọc Shop/Campaign/Sản phẩm hiện tại) để thấy xu hướng hiệu quả quảng cáo</p>
+      <div class="flex flex-wrap items-end gap-3 mb-4">
+        <div><label class="mb-1 block text-xs font-medium text-gray-400">Loại kỳ</label>
+          <select id="cmp_periodType" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800">
+            <option value="month" selected>Theo tháng</option>
+            <option value="quarter">Theo quý</option>
+            <option value="year">Theo năm</option>
+          </select></div>
+        <div><label class="mb-1 block text-xs font-medium text-gray-400">Kỳ 1 (cũ nhất)</label>
+          <select id="cmp_p1" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800"></select></div>
+        <div><label class="mb-1 block text-xs font-medium text-gray-400">Kỳ 2</label>
+          <select id="cmp_p2" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800"></select></div>
+        <div><label class="mb-1 block text-xs font-medium text-gray-400">Kỳ 3 (mới nhất)</label>
+          <select id="cmp_p3" class="rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800"></select></div>
+      </div>
+      <div id="cmp_table" class="overflow-x-auto mb-4"></div>
+      <div id="cmp_benchmark" class="mb-4"></div>
+      <div id="cmp_summary" class="rounded-lg bg-gray-50 dark:bg-white/5 px-4 py-3 text-sm leading-relaxed"></div>
+    </div>
   </div>`
 }
 
@@ -598,6 +620,9 @@ function initDashboardPage() {
   ;['f_from', 'f_to'].forEach((id) => document.getElementById(id).addEventListener('change', loadDashboardData))
   ;['f_groupBy', 'f_shop', 'f_campaign', 'f_product'].forEach((id) => document.getElementById(id).addEventListener('change', renderDashboard))
   document.getElementById('f_refreshBtn').addEventListener('click', loadDashboardData)
+
+  document.getElementById('cmp_periodType').addEventListener('change', () => { populateComparisonSelectors(); renderComparison() })
+  ;['cmp_p1', 'cmp_p2', 'cmp_p3'].forEach((id) => document.getElementById(id).addEventListener('change', renderComparison))
 
   loadDashboardData()
 }
@@ -681,6 +706,9 @@ function renderDashboard() {
   renderHeatmap(rows, topCampaigns)
   renderTopTable('topCampaignTable', topCampaigns, 'Campaign')
   renderTopTable('topProductTable', topProducts, 'Mã sản phẩm')
+
+  populateComparisonSelectors()
+  renderComparison()
 }
 
 function renderKpiCards(kpis) {
@@ -790,6 +818,200 @@ function renderTopTable(containerId, rows, labelHeader) {
       <td class="py-2 pr-3">${formatPercent(r.ctr)}</td>
       <td class="py-2 pr-3">${formatNumber(r.orders)}</td>
     </tr>`).join('')}</tbody></table>`
+}
+
+/* -----------------------------------------------------------------------
+   8b. SO SANH HIEU QUA THEO KY (3 ky lien tiep: Thang/Quy/Nam)
+   Doi chieu % chenh lech giua cac ky + danh gia theo nguong tham khao
+   chung cho ROAS/ACOS/CTR/CVR. Cac nguong nay CHI la tham khao pho bien
+   cua nganh e-commerce, thuc te "tot/xau" phu thuoc bien loi nhuan tung
+   nganh hang - khong phai chuan tuyet doi.
+   ----------------------------------------------------------------------- */
+const BENCHMARKS = {
+  roas: [
+    { max: 3, label: 'Cần cải thiện', color: 'bg-red-100 text-red-700' },
+    { max: 8, label: 'Ổn / Khá', color: 'bg-yellow-100 text-yellow-700' },
+    { max: Infinity, label: 'Tốt', color: 'bg-green-100 text-green-700' }
+  ],
+  acos: [
+    { max: 15, label: 'Tốt', color: 'bg-green-100 text-green-700' },
+    { max: 30, label: 'Ổn / Khá', color: 'bg-yellow-100 text-yellow-700' },
+    { max: Infinity, label: 'Cần cải thiện', color: 'bg-red-100 text-red-700' }
+  ],
+  ctr: [
+    { max: 0.5, label: 'Thấp', color: 'bg-red-100 text-red-700' },
+    { max: 1.5, label: 'Trung bình', color: 'bg-yellow-100 text-yellow-700' },
+    { max: Infinity, label: 'Tốt', color: 'bg-green-100 text-green-700' }
+  ],
+  cvr: [
+    { max: 1, label: 'Thấp', color: 'bg-red-100 text-red-700' },
+    { max: 3, label: 'Trung bình', color: 'bg-yellow-100 text-yellow-700' },
+    { max: Infinity, label: 'Tốt', color: 'bg-green-100 text-green-700' }
+  ]
+}
+function evalBenchmark(metric, value) {
+  const tiers = BENCHMARKS[metric]
+  for (const t of tiers) if (value <= t.max) return t
+  return tiers[tiers.length - 1]
+}
+
+const CMP_METRIC_ROWS = [
+  { key: 'revenue', label: 'Doanh thu', fmt: formatVND, dir: 'up-good' },
+  { key: 'cost', label: 'Chi phí Ads', fmt: formatVND, dir: 'neutral' },
+  { key: 'roas', label: 'ROAS', fmt: (v) => v.toFixed(2) + 'x', dir: 'up-good' },
+  { key: 'acos', label: 'ACOS', fmt: formatPercent, dir: 'down-good' },
+  { key: 'ctr', label: 'CTR', fmt: formatPercent, dir: 'up-good' },
+  { key: 'cpc', label: 'CPC', fmt: formatVND, dir: 'down-good' },
+  { key: 'cpm', label: 'CPM', fmt: formatVND, dir: 'down-good' },
+  { key: 'cpa', label: 'CPA', fmt: formatVND, dir: 'down-good' },
+  { key: 'cvr', label: 'CVR / Conversion Rate', fmt: formatPercent, dir: 'up-good' },
+  { key: 'clicks', label: 'Click', fmt: formatNumber, dir: 'up-good' },
+  { key: 'impressions', label: 'Impression', fmt: formatNumber, dir: 'neutral' },
+  { key: 'orders', label: 'Orders', fmt: formatNumber, dir: 'up-good' }
+]
+
+// Loc rieng cho khoi so sanh: theo Shop/Campaign/San pham dang chon, KHONG
+// gioi han theo "Tu ngay/Den ngay" (de co du 3 ky de so sanh trong toan bo
+// du lieu da tai ve theo khoang ngay rong hon o bo loc chinh).
+function getComparisonRows() {
+  const shop = document.getElementById('f_shop').value
+  const campaign = document.getElementById('f_campaign').value
+  const product = document.getElementById('f_product').value
+  return dashRawRows.filter((r) => {
+    if (shop && r.shop_name !== shop) return false
+    if (campaign && r.ten_dich_vu_hien_thi !== campaign) return false
+    if (product && r.ma_san_pham !== product) return false
+    return true
+  })
+}
+
+function getAvailableComparisonPeriods(periodType) {
+  const rows = getComparisonRows()
+  const keys = new Set()
+  rows.forEach((r) => { const k = periodKey(r, periodType); if (k !== 'N/A') keys.add(k) })
+  return Array.from(keys).sort()
+}
+
+function populateComparisonSelectors() {
+  const periodType = document.getElementById('cmp_periodType').value
+  const periods = getAvailableComparisonPeriods(periodType)
+  const last3 = periods.slice(-3)
+  ;['cmp_p1', 'cmp_p2', 'cmp_p3'].forEach((id, idx) => {
+    const el = document.getElementById(id)
+    const prevValue = el.value
+    el.innerHTML = periods.map((p) => `<option value="${p}">${periodDisplay(p, periodType)}</option>`).join('')
+    if (periods.includes(prevValue)) el.value = prevValue
+    else if (last3[idx]) el.value = last3[idx]
+  })
+}
+
+function pctChange(a, b) {
+  if (a === 0) return b === 0 ? 0 : null
+  return ((b - a) / a) * 100
+}
+
+function changeBadge(pct, direction) {
+  if (pct === null || pct === undefined) return '<span class="text-gray-400">—</span>'
+  const isUp = pct > 0.5, isDown = pct < -0.5
+  let favorable = null
+  if (direction === 'up-good') favorable = isUp ? true : (isDown ? false : null)
+  if (direction === 'down-good') favorable = isDown ? true : (isUp ? false : null)
+  const color = favorable === true ? 'text-green-600' : (favorable === false ? 'text-red-600' : 'text-gray-500')
+  const arrow = isUp ? '▲' : (isDown ? '▼' : '→')
+  return `<span class="${color} font-medium">${arrow} ${Math.abs(pct).toFixed(1)}%</span>`
+}
+
+function renderBenchmarkBadges(latestKpi) {
+  const items = [
+    { key: 'roas', label: 'ROAS', value: latestKpi.roas, display: latestKpi.roas.toFixed(2) + 'x' },
+    { key: 'acos', label: 'ACOS', value: latestKpi.acos, display: formatPercent(latestKpi.acos) },
+    { key: 'ctr', label: 'CTR', value: latestKpi.ctr, display: formatPercent(latestKpi.ctr) },
+    { key: 'cvr', label: 'CVR', value: latestKpi.cvr, display: formatPercent(latestKpi.cvr) }
+  ]
+  return `<p class="text-xs font-medium text-gray-400 mb-2">Đánh giá chỉ số ở kỳ mới nhất (ngưỡng tham khảo chung của ngành, thực tế "tốt/xấu" còn phụ thuộc biên lợi nhuận từng ngành hàng):</p>
+    <div class="flex flex-wrap gap-2">
+      ${items.map((i) => {
+        const b = evalBenchmark(i.key, i.value)
+        return `<span class="rounded-full px-3 py-1 text-xs font-medium ${b.color}">${i.label} ${i.display} — ${b.label}</span>`
+      }).join('')}
+    </div>`
+}
+
+function buildComparisonSummary(labels, kpi1, kpi3) {
+  const roasChange = pctChange(kpi1.roas, kpi3.roas)
+  const acosChange = pctChange(kpi1.acos, kpi3.acos)
+  const revenueChange = pctChange(kpi1.revenue, kpi3.revenue)
+  const costChange = pctChange(kpi1.cost, kpi3.cost)
+
+  const parts = [`So sánh từ <b>${labels[0]}</b> đến <b>${labels[2]}</b>:`]
+
+  if (roasChange !== null) {
+    if (roasChange > 5) parts.push(`ROAS tăng ${roasChange.toFixed(1)}% — hiệu quả quảng cáo đang <b class="text-green-600">cải thiện</b>.`)
+    else if (roasChange < -5) parts.push(`ROAS giảm ${Math.abs(roasChange).toFixed(1)}% — hiệu quả quảng cáo đang <b class="text-red-600">đi xuống</b>, nên xem lại từ khóa/giá thầu/sản phẩm quảng cáo.`)
+    else parts.push(`ROAS khá ổn định (thay đổi ${roasChange.toFixed(1)}%).`)
+  }
+  if (acosChange !== null && acosChange > 20) {
+    parts.push(`ACOS tăng ${acosChange.toFixed(1)}% — chi phí quảng cáo trên mỗi đồng doanh thu đang <b class="text-red-600">tăng cao</b>, cần kiểm tra lại hiệu suất từ khóa/vị trí quảng cáo.`)
+  }
+  if (revenueChange !== null && costChange !== null) {
+    if (costChange > revenueChange + 10) parts.push(`Chi phí tăng (${costChange.toFixed(1)}%) nhanh hơn doanh thu (${revenueChange.toFixed(1)}%) — cần rà soát lại ngân sách quảng cáo.`)
+    else if (revenueChange > costChange + 10) parts.push(`Doanh thu tăng (${revenueChange.toFixed(1)}%) nhanh hơn chi phí (${costChange.toFixed(1)}%) — quảng cáo đang được tối ưu tốt hơn theo thời gian.`)
+  }
+  if (parts.length === 1) parts.push('Chưa đủ dữ liệu để đưa ra nhận xét rõ ràng (một số kỳ có doanh thu/chi phí bằng 0).')
+
+  return parts.join(' ')
+}
+
+function renderComparison() {
+  const periodType = document.getElementById('cmp_periodType').value
+  const rows = getComparisonRows()
+  const p1 = document.getElementById('cmp_p1').value
+  const p2 = document.getElementById('cmp_p2').value
+  const p3 = document.getElementById('cmp_p3').value
+
+  const tableEl = document.getElementById('cmp_table')
+  const benchmarkEl = document.getElementById('cmp_benchmark')
+  const summaryEl = document.getElementById('cmp_summary')
+  const availablePeriods = getAvailableComparisonPeriods(periodType)
+
+  if (availablePeriods.length < 3 || !p1 || !p2 || !p3) {
+    tableEl.innerHTML = `<p class="text-sm text-gray-400 py-2">Cần ít nhất 3 kỳ có dữ liệu để so sánh (hiện có ${availablePeriods.length} kỳ trong khoảng ngày đang tải). Hãy mở rộng "Từ ngày/Đến ngày" ở bộ lọc phía trên rồi bấm 🔄 Làm mới.</p>`
+    benchmarkEl.innerHTML = ''
+    summaryEl.innerHTML = ''
+    return
+  }
+
+  const kpi1 = computeKpis(rows.filter((r) => periodKey(r, periodType) === p1))
+  const kpi2 = computeKpis(rows.filter((r) => periodKey(r, periodType) === p2))
+  const kpi3 = computeKpis(rows.filter((r) => periodKey(r, periodType) === p3))
+  const labels = [periodDisplay(p1, periodType), periodDisplay(p2, periodType), periodDisplay(p3, periodType)]
+
+  tableEl.innerHTML = `<table class="w-full text-left text-sm">
+    <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+      <th class="py-2 pr-3 font-medium text-gray-400">Chỉ số</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">${labels[0]}</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">${labels[1]}</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">% so với Kỳ 1</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">${labels[2]}</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">% so với Kỳ 2</th>
+    </tr></thead>
+    <tbody>
+      ${CMP_METRIC_ROWS.map((d) => {
+        const v1 = kpi1[d.key], v2 = kpi2[d.key], v3 = kpi3[d.key]
+        return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+          <td class="py-2 pr-3">${d.label}</td>
+          <td class="py-2 pr-3">${d.fmt(v1)}</td>
+          <td class="py-2 pr-3">${d.fmt(v2)}</td>
+          <td class="py-2 pr-3">${changeBadge(pctChange(v1, v2), d.dir)}</td>
+          <td class="py-2 pr-3">${d.fmt(v3)}</td>
+          <td class="py-2 pr-3">${changeBadge(pctChange(v2, v3), d.dir)}</td>
+        </tr>`
+      }).join('')}
+    </tbody>
+  </table>`
+
+  benchmarkEl.innerHTML = renderBenchmarkBadges(kpi3)
+  summaryEl.innerHTML = buildComparisonSummary(labels, kpi1, kpi3)
 }
 
 /* -----------------------------------------------------------------------
