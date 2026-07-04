@@ -79,6 +79,7 @@
     <nav class="flex flex-1 flex-col gap-1">
       <button data-page="dashboard" class="nav-btn flex items-center gap-3 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-brand-50 dark:hover:bg-white/5">📊 Dashboard</button>
       <button data-page="upload" class="nav-btn flex items-center gap-3 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-brand-50 dark:hover:bg-white/5">⬆️ Upload dữ liệu</button>
+      <button data-page="mediaplan" class="nav-btn flex items-center gap-3 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-500 dark:text-gray-400 hover:bg-brand-50 dark:hover:bg-white/5">📅 Kế hoạch tháng</button>
     </nav>
     <div class="mt-auto border-t border-gray-200 dark:border-gray-800 pt-4 text-xs text-gray-400">
       Đăng nhập: <span id="userEmailLabel" class="font-medium text-gray-600 dark:text-gray-300"></span>
@@ -96,6 +97,7 @@
     <main class="flex-1 overflow-y-auto p-6">
       <div id="page-dashboard" class="page-section flex flex-col gap-6"></div>
       <div id="page-upload" class="page-section hidden-important flex flex-col gap-6"></div>
+      <div id="page-mediaplan" class="page-section hidden-important flex flex-col gap-6"></div>
     </main>
   </div>
 </div>
@@ -487,6 +489,7 @@ function goToPage(page) {
   // Upload xong quay lai Dashboard van thay trong vi du lieu cu da cache).
   if (page === 'dashboard') { if (!dashboardInitialized) initDashboardPage(); else loadDashboardData() }
   if (page === 'upload') { if (!uploadInitialized) initUploadPage(); else loadUploadHistory() }
+  if (page === 'mediaplan') { if (!mediaPlanInitialized) initMediaPlanPage(); else loadMediaPlanList() }
 }
 document.querySelectorAll('.nav-btn').forEach((btn) => btn.addEventListener('click', () => goToPage(btn.dataset.page)))
 
@@ -1301,6 +1304,447 @@ async function loadUploadHistory() {
   } catch (err) {
     document.getElementById('up_historyTable').innerHTML = `<p class="text-sm text-red-500">Lỗi tải lịch sử: ${escapeHtml(err.message)}</p>`
   }
+}
+
+/* -----------------------------------------------------------------------
+   9b. TRANG KE HOACH THANG (MEDIA PLAN)
+   Upload file "MediaPlan_ThangX_20XX.xlsx" -> trich xuat phan Muc tieu
+   Ngan sach/KPI + Phan bo Giai doan (sheet 01_Dashboard) -> luu vao
+   media_plans/media_plan_phases, luu FILE GOC vao Supabase Storage (bucket
+   "media-plans") de xem/tai lai day du 14 sheet. Xem chi tiet 1 Ke hoach se
+   tu doi chieu voi so lieu THUC TE (ads_campaign_reports) cung Shop/Thang.
+   ----------------------------------------------------------------------- */
+let mediaPlanInitialized = false
+let mediaPlanState = { file: null, parsed: null }
+
+function mediaPlanSkeletonHTML() {
+  return `
+  <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <h3 class="text-sm font-semibold mb-1">Upload Kế hoạch tháng (Media Plan)</h3>
+    <p class="text-xs text-gray-400 mb-4">Đặt tên file dạng <b>MediaPlan_ThangX_20XX.xlsx</b> (vd MediaPlan_Thang7_2026.xlsx). App trích xuất phần Mục tiêu Ngân sách/KPI + Phân bổ theo Giai đoạn (sheet 01_Dashboard) để đối chiếu với dữ liệu thực tế — toàn bộ file gốc (14 sheet: ma trận từ khóa, chiến lược giá thầu, decision tree...) được lưu nguyên vẹn để tải lại xem đầy đủ.</p>
+
+    <div class="mb-4 max-w-xs">
+      <label class="mb-1 block text-xs font-medium text-gray-400">Shop</label>
+      <input id="mp_shopName" value="Default Shop" class="w-full rounded-lg border px-3 py-2 text-sm border-gray-300 dark:border-gray-700 dark:bg-gray-800" />
+    </div>
+
+    <div id="mp_dropzone" class="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-700 p-10 text-center">
+      <div class="mb-3 text-4xl">📅</div>
+      <p class="text-sm font-medium">Kéo & thả file Media Plan (.xlsx) vào đây</p>
+      <p class="mt-1 text-xs text-gray-400">hoặc bấm để chọn file</p>
+      <input id="mp_fileInput" type="file" accept=".xlsx,.xls" class="hidden-important" />
+    </div>
+
+    <div id="mp_parsing" class="hidden-important mt-4"></div>
+    <div id="mp_review" class="hidden-important mt-4 flex flex-col gap-4"></div>
+    <div id="mp_syncing" class="hidden-important mt-4"></div>
+    <div id="mp_done" class="hidden-important mt-4 flex flex-col gap-4"></div>
+  </div>
+
+  <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <h3 class="text-sm font-semibold mb-3">Danh sách Kế hoạch đã lưu</h3>
+    <div id="mp_list" class="overflow-x-auto"></div>
+  </div>
+
+  <div id="mp_detail" class="hidden-important flex flex-col gap-4"></div>`
+}
+
+function initMediaPlanPage() {
+  mediaPlanInitialized = true
+  const container = document.getElementById('page-mediaplan')
+  container.innerHTML = mediaPlanSkeletonHTML()
+
+  const dropzone = document.getElementById('mp_dropzone')
+  const fileInput = document.getElementById('mp_fileInput')
+  dropzone.addEventListener('click', () => fileInput.click())
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('border-brand', 'bg-brand-50') })
+  dropzone.addEventListener('dragleave', () => dropzone.classList.remove('border-brand', 'bg-brand-50'))
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault()
+    dropzone.classList.remove('border-brand', 'bg-brand-50')
+    handleMediaPlanFileSelected(e.dataTransfer.files?.[0])
+  })
+  fileInput.addEventListener('change', (e) => handleMediaPlanFileSelected(e.target.files?.[0]))
+
+  loadMediaPlanList()
+}
+
+/** Doc file Media Plan: lay Thang/Nam tu TEN FILE, cac chi so tu sheet 01_Dashboard */
+async function parseMediaPlanFile(file) {
+  const m = file.name.match(/Thang[_\s]?(\d{1,2})[_\s]?(\d{4})/i)
+  if (!m) throw new Error('Không nhận diện được Tháng/Năm từ tên file. Đặt tên file dạng "MediaPlan_ThangX_20XX.xlsx" (vd MediaPlan_Thang7_2026.xlsx).')
+  const thang = parseInt(m[1], 10)
+  const nam = parseInt(m[2], 10)
+  const periodStart = `${nam}-${pad2(thang)}-01`
+  const lastDay = new Date(nam, thang, 0).getDate()
+  const periodEnd = `${nam}-${pad2(thang)}-${pad2(lastDay)}`
+
+  const buffer = await file.arrayBuffer()
+  const wb = XLSX.read(buffer, { type: 'array', cellDates: true })
+
+  const dashSheet = wb.Sheets['01_Dashboard']
+  if (!dashSheet) throw new Error('Không tìm thấy sheet "01_Dashboard" trong file. Đảm bảo dùng đúng file mẫu Media Plan.')
+  const dashRows = XLSX.utils.sheet_to_json(dashSheet, { header: 1, raw: true, defval: null })
+
+  const headerIdx = dashRows.findIndex((r) => nfc(String(r?.[0] ?? '').trim()) === nfc('Chỉ số'))
+  if (headerIdx === -1) throw new Error('Không tìm thấy bảng "Chỉ số / Toàn Shop" trong sheet 01_Dashboard.')
+
+  const productNames = [
+    String(dashRows[headerIdx][2] ?? 'Sản phẩm 1').trim(),
+    String(dashRows[headerIdx][3] ?? 'Sản phẩm 2').trim()
+  ]
+  const metrics = { total_budget: 0, roas_target: 0, cpa_target: 0, cpc_target: 0, ctr_target: 0, cvr_target: 0, atc_rate_target: 0, gmv_target: 0, orders_target: 0, aov_assumption: 0 }
+  const productMetrics = [{ name: productNames[0] }, { name: productNames[1] }]
+  const PERCENT_KEYS = ['ctr_target', 'cvr_target', 'atc_rate_target'] // sheet luu dang phan so 0-1, quy doi ve %
+
+  for (let i = headerIdx + 1; i < dashRows.length; i++) {
+    const row = dashRows[i]
+    const label = nfc(String(row?.[0] ?? '').trim()).toLowerCase()
+    if (!label) break
+
+    let key = null
+    if (label.includes('ngân sách') && (label.includes('tổng') || label.includes('ads'))) key = 'total_budget'
+    else if (label.startsWith('roas')) key = 'roas_target'
+    else if (label.startsWith('cpa')) key = 'cpa_target'
+    else if (label.startsWith('cpc')) key = 'cpc_target'
+    else if (label.startsWith('ctr')) key = 'ctr_target'
+    else if (label.startsWith('cr ') || label.startsWith('cr(')) key = 'cvr_target'
+    else if (label.includes('add to cart')) key = 'atc_rate_target'
+    else if (label.includes('gmv')) key = 'gmv_target'
+    else if (label.includes('đơn hàng kỳ vọng')) key = 'orders_target'
+    else if (label.includes('aov')) key = 'aov_assumption'
+    if (!key) continue
+
+    const mult = PERCENT_KEYS.includes(key) ? 100 : 1
+    metrics[key] = toFloatOrZero(row[1]) * mult
+    productMetrics[0][key] = toFloatOrZero(row[2]) * mult
+    productMetrics[1][key] = toFloatOrZero(row[3]) * mult
+  }
+
+  const phaseHeaderIdx = dashRows.findIndex((r) => nfc(String(r?.[0] ?? '').trim()) === nfc('Giai đoạn'))
+  const phases = []
+  if (phaseHeaderIdx !== -1) {
+    for (let i = phaseHeaderIdx + 1; i < dashRows.length; i++) {
+      const row = dashRows[i]
+      const name = String(row?.[0] ?? '').trim()
+      if (!name || nfc(name).toUpperCase() === 'TỔNG') break
+      phases.push({
+        phase_name: name,
+        days: toIntOrZero(row[1]),
+        budget: toFloatOrZero(row[2]),
+        budget_pct: toFloatOrZero(row[3]) * 100,
+        gmv_target: toFloatOrZero(row[4]),
+        orders_target: toIntOrZero(row[5]),
+        roas_target: toFloatOrZero(row[6]),
+        role_note: row[7] ? String(row[7]).trim() : null,
+        sort_order: phases.length
+      })
+    }
+  }
+
+  let planTitle = `Media Plan Tháng ${thang}/${nam}`
+  const coverSheet = wb.Sheets['00_BiaTongQuan']
+  if (coverSheet) {
+    const coverRows = XLSX.utils.sheet_to_json(coverSheet, { header: 1, raw: true, defval: null })
+    if (coverRows?.[0]?.[0]) planTitle = nfc(String(coverRows[0][0]).trim())
+  }
+
+  return { thang, nam, periodStart, periodEnd, planTitle, ...metrics, productBreakdown: productMetrics, phases }
+}
+
+async function handleMediaPlanFileSelected(file) {
+  if (!file) return
+  if (!/\.(xlsx|xls)$/i.test(file.name)) { alert('Chỉ hỗ trợ file .xlsx hoặc .xls'); return }
+  mediaPlanState.file = file
+  showMediaPlanStep('parsing')
+  document.getElementById('mp_parsing').innerHTML = progressBarHTML(40, `Đang đọc file ${file.name}...`)
+
+  try {
+    const parsed = await parseMediaPlanFile(file)
+    mediaPlanState.parsed = parsed
+    renderMediaPlanReview(parsed)
+    showMediaPlanStep('review')
+  } catch (err) {
+    alert('Lỗi đọc file: ' + err.message)
+    showMediaPlanStep('idle')
+  }
+}
+
+function showMediaPlanStep(step) {
+  ;['parsing', 'review', 'syncing', 'done'].forEach((s) => document.getElementById(`mp_${s}`).classList.add('hidden-important'))
+  if (step !== 'idle') document.getElementById(`mp_${step}`).classList.remove('hidden-important')
+}
+
+function renderMediaPlanReview(p) {
+  const html = `
+    <div class="rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">
+      ✅ Đã đọc: <b>${escapeHtml(p.planTitle)}</b><br>
+      Tháng/Năm: <b>${p.thang}/${p.nam}</b> (${p.periodStart} → ${p.periodEnd}) ·
+      Tổng ngân sách: <b>${formatVND(p.total_budget)}</b> ·
+      ROAS mục tiêu: <b>${p.roas_target.toFixed(2)}x</b> ·
+      ${p.phases.length} giai đoạn · ${p.productBreakdown.length} sản phẩm
+    </div>
+    <div class="flex gap-3">
+      <button id="mp_confirmBtn" class="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white hover:bg-brand-600">Lưu Kế hoạch lên Supabase</button>
+      <button id="mp_resetBtn" class="rounded-lg border px-4 py-2 text-sm border-gray-300 dark:border-gray-700">Chọn file khác</button>
+    </div>`
+  document.getElementById('mp_review').innerHTML = html
+  document.getElementById('mp_confirmBtn').addEventListener('click', handleMediaPlanConfirmSync)
+  document.getElementById('mp_resetBtn').addEventListener('click', resetMediaPlanUpload)
+}
+
+function resetMediaPlanUpload() {
+  mediaPlanState = { file: null, parsed: null }
+  document.getElementById('mp_fileInput').value = ''
+  showMediaPlanStep('idle')
+}
+
+async function handleMediaPlanConfirmSync() {
+  const parsed = mediaPlanState.parsed
+  const file = mediaPlanState.file
+  if (!parsed || !file) return
+  showMediaPlanStep('syncing')
+  document.getElementById('mp_syncing').innerHTML = progressBarHTML(30, 'Đang tải file gốc lên Supabase Storage...')
+
+  try {
+    const shopName = document.getElementById('mp_shopName').value || 'Default Shop'
+    const storagePath = `${shopName}/${parsed.nam}-${pad2(parsed.thang)}.xlsx`
+
+    const { error: uploadError } = await sb.storage.from('media-plans')
+      .upload(storagePath, file, { upsert: true, contentType: file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    if (uploadError) throw uploadError
+
+    document.getElementById('mp_syncing').innerHTML = progressBarHTML(70, 'Đang lưu dữ liệu tóm tắt...')
+
+    const { data: planRow, error: planError } = await sb.from('media_plans').upsert({
+      shop_name: shopName,
+      thang: parsed.thang,
+      nam: parsed.nam,
+      plan_title: parsed.planTitle,
+      period_start: parsed.periodStart,
+      period_end: parsed.periodEnd,
+      total_budget: parsed.total_budget,
+      roas_target: parsed.roas_target,
+      cpa_target: parsed.cpa_target,
+      cpc_target: parsed.cpc_target,
+      ctr_target: parsed.ctr_target,
+      cvr_target: parsed.cvr_target,
+      atc_rate_target: parsed.atc_rate_target,
+      gmv_target: parsed.gmv_target,
+      orders_target: parsed.orders_target,
+      aov_assumption: parsed.aov_assumption,
+      product_breakdown: parsed.productBreakdown,
+      file_path: storagePath,
+      file_name: file.name,
+      uploaded_by: currentSession?.user?.id
+    }, { onConflict: 'plan_key' }).select().single()
+    if (planError) throw planError
+
+    // Xoa phases cu, ghi lai phases moi (tranh du thua khi upload lai)
+    await sb.from('media_plan_phases').delete().eq('plan_id', planRow.id)
+    if (parsed.phases.length) {
+      const phaseRows = parsed.phases.map((ph) => ({ ...ph, plan_id: planRow.id }))
+      const { error: phaseError } = await sb.from('media_plan_phases').insert(phaseRows)
+      if (phaseError) throw phaseError
+    }
+
+    document.getElementById('mp_done').innerHTML = `
+      <div class="rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">✅ Đã lưu Kế hoạch tháng ${parsed.thang}/${parsed.nam} cho Shop "${escapeHtml(shopName)}".</div>
+      <button id="mp_afterDoneBtn" class="w-fit rounded-lg border px-4 py-2 text-sm border-gray-300 dark:border-gray-700">Upload kế hoạch khác</button>`
+    document.getElementById('mp_afterDoneBtn').addEventListener('click', resetMediaPlanUpload)
+    showMediaPlanStep('done')
+    loadMediaPlanList()
+  } catch (err) {
+    alert('Lỗi lưu Kế hoạch: ' + err.message)
+    showMediaPlanStep('review')
+  }
+}
+
+async function loadMediaPlanList() {
+  const container = document.getElementById('mp_list')
+  container.innerHTML = '<p class="text-sm text-gray-400">Đang tải...</p>'
+  try {
+    const { data, error } = await sb.from('media_plans').select('*').order('nam', { ascending: false }).order('thang', { ascending: false })
+    if (error) throw error
+    renderMediaPlanList(data || [])
+  } catch (err) {
+    container.innerHTML = `<p class="text-sm text-red-500">Lỗi tải danh sách: ${escapeHtml(err.message)}</p>`
+  }
+}
+
+function renderMediaPlanList(plans) {
+  const container = document.getElementById('mp_list')
+  if (!plans.length) { container.innerHTML = '<p class="text-sm text-gray-400">Chưa có Kế hoạch nào được lưu.</p>'; return }
+  container.innerHTML = `<table class="w-full text-left text-sm">
+    <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+      <th class="py-2 pr-4 font-medium text-gray-400">Tháng/Năm</th>
+      <th class="py-2 pr-4 font-medium text-gray-400">Shop</th>
+      <th class="py-2 pr-4 font-medium text-gray-400">Tổng ngân sách</th>
+      <th class="py-2 pr-4 font-medium text-gray-400">ROAS mục tiêu</th>
+      <th class="py-2 pr-4 font-medium text-gray-400">Cập nhật</th>
+      <th class="py-2 pr-4 font-medium text-gray-400"></th>
+    </tr></thead>
+    <tbody>${plans.map((p) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+      <td class="py-2 pr-4">${pad2(p.thang)}/${p.nam}</td>
+      <td class="py-2 pr-4">${escapeHtml(p.shop_name)}</td>
+      <td class="py-2 pr-4">${formatVND(p.total_budget)}</td>
+      <td class="py-2 pr-4">${Number(p.roas_target).toFixed(2)}x</td>
+      <td class="py-2 pr-4">${new Date(p.updated_at).toLocaleDateString('vi-VN')}</td>
+      <td class="py-2 pr-4"><button data-plan-id="${p.id}" class="mp-view-btn rounded-lg border px-3 py-1 text-xs border-gray-300 dark:border-gray-700">Xem chi tiết</button></td>
+    </tr>`).join('')}</tbody></table>`
+
+  container.querySelectorAll('.mp-view-btn').forEach((btn) => btn.addEventListener('click', () => showMediaPlanDetail(btn.dataset.planId)))
+}
+
+async function showMediaPlanDetail(planId) {
+  const detailEl = document.getElementById('mp_detail')
+  detailEl.classList.remove('hidden-important')
+  detailEl.innerHTML = '<div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800"><p class="text-sm text-gray-400">Đang tải chi tiết Kế hoạch...</p></div>'
+  detailEl.scrollIntoView({ behavior: 'smooth', block: 'start' })
+
+  try {
+    const { data: plan, error: planErr } = await sb.from('media_plans').select('*').eq('id', planId).single()
+    if (planErr) throw planErr
+    const { data: phases, error: phaseErr } = await sb.from('media_plan_phases').select('*').eq('plan_id', planId).order('sort_order')
+    if (phaseErr) throw phaseErr
+
+    // Doi chieu Ke hoach vs Thuc te: lay du lieu that cung Shop/Thang/Nam
+    const { data: actualRows, error: actualErr } = await sb.from('v_ads_computed').select('*')
+      .eq('shop_name', plan.shop_name).eq('thang', plan.thang).eq('nam', plan.nam).limit(20000)
+    const actualKpi = actualErr ? null : computeKpis(actualRows || [])
+
+    let fileUrl = null
+    if (plan.file_path) {
+      const { data: signedData } = await sb.storage.from('media-plans').createSignedUrl(plan.file_path, 3600)
+      fileUrl = signedData?.signedUrl || null
+    }
+
+    renderMediaPlanDetail(plan, phases || [], actualKpi, fileUrl)
+  } catch (err) {
+    detailEl.innerHTML = `<div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800"><p class="text-sm text-red-500">Lỗi tải chi tiết: ${escapeHtml(err.message)}</p></div>`
+  }
+}
+
+function renderMediaPlanDetail(plan, phases, actualKpi, fileUrl) {
+  const items = [
+    { label: 'Tổng ngân sách', value: formatVND(plan.total_budget) },
+    { label: 'ROAS mục tiêu', value: Number(plan.roas_target).toFixed(2) + 'x' },
+    { label: 'CPA mục tiêu', value: formatVND(plan.cpa_target) },
+    { label: 'CPC mục tiêu', value: formatVND(plan.cpc_target) },
+    { label: 'CTR mục tiêu', value: formatPercent(plan.ctr_target) },
+    { label: 'CVR mục tiêu', value: formatPercent(plan.cvr_target) },
+    { label: 'Add To Cart Rate', value: formatPercent(plan.atc_rate_target) },
+    { label: 'GMV kỳ vọng', value: formatVND(plan.gmv_target) },
+    { label: 'Đơn hàng kỳ vọng', value: formatNumber(plan.orders_target) },
+    { label: 'AOV giả định', value: formatVND(plan.aov_assumption) }
+  ]
+
+  const productRows = (plan.product_breakdown || []).map((pr) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+    <td class="py-2 pr-3">${escapeHtml(pr.name)}</td>
+    <td class="py-2 pr-3">${formatVND(pr.total_budget)}</td>
+    <td class="py-2 pr-3">${(pr.roas_target || 0).toFixed(2)}x</td>
+    <td class="py-2 pr-3">${formatVND(pr.cpa_target)}</td>
+    <td class="py-2 pr-3">${formatVND(pr.gmv_target)}</td>
+    <td class="py-2 pr-3">${formatNumber(pr.orders_target)}</td>
+  </tr>`).join('')
+
+  const phaseRows = phases.map((ph) => `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+    <td class="py-2 pr-3">${escapeHtml(ph.phase_name)}</td>
+    <td class="py-2 pr-3">${ph.days}</td>
+    <td class="py-2 pr-3">${formatVND(ph.budget)}</td>
+    <td class="py-2 pr-3">${Number(ph.budget_pct).toFixed(1)}%</td>
+    <td class="py-2 pr-3">${formatVND(ph.gmv_target)}</td>
+    <td class="py-2 pr-3">${formatNumber(ph.orders_target)}</td>
+    <td class="py-2 pr-3">${Number(ph.roas_target).toFixed(2)}x</td>
+    <td class="py-2 pr-3 text-xs text-gray-500">${escapeHtml(ph.role_note || '')}</td>
+  </tr>`).join('')
+
+  let comparisonHtml = '<p class="text-sm text-gray-400">Chưa có dữ liệu thực tế (từ Upload dữ liệu) cho Shop/Tháng này để đối chiếu.</p>'
+  if (actualKpi && (actualKpi.revenue > 0 || actualKpi.cost > 0)) {
+    const rows = [
+      { label: 'GMV / Doanh thu', target: plan.gmv_target, actual: actualKpi.revenue, fmt: formatVND },
+      { label: 'Chi phí Ads', target: plan.total_budget, actual: actualKpi.cost, fmt: formatVND },
+      { label: 'ROAS', target: plan.roas_target, actual: actualKpi.roas, fmt: (v) => v.toFixed(2) + 'x' },
+      { label: 'CPA', target: plan.cpa_target, actual: actualKpi.cpa, fmt: formatVND },
+      { label: 'CPC', target: plan.cpc_target, actual: actualKpi.cpc, fmt: formatVND },
+      { label: 'CTR', target: plan.ctr_target, actual: actualKpi.ctr, fmt: formatPercent },
+      { label: 'CVR', target: plan.cvr_target, actual: actualKpi.cvr, fmt: formatPercent },
+      { label: 'Đơn hàng', target: plan.orders_target, actual: actualKpi.orders, fmt: formatNumber }
+    ]
+    comparisonHtml = `<table class="w-full text-left text-sm">
+      <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+        <th class="py-2 pr-3 font-medium text-gray-400">Chỉ số</th>
+        <th class="py-2 pr-3 font-medium text-gray-400">Kế hoạch</th>
+        <th class="py-2 pr-3 font-medium text-gray-400">Thực tế</th>
+        <th class="py-2 pr-3 font-medium text-gray-400">% đạt được</th>
+      </tr></thead>
+      <tbody>${rows.map((r) => {
+        const pct = r.target > 0 ? (r.actual / r.target) * 100 : null
+        const color = pct === null ? 'text-gray-400' : (pct >= 100 ? 'text-green-600' : (pct >= 80 ? 'text-yellow-600' : 'text-red-600'))
+        return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+          <td class="py-2 pr-3">${r.label}</td>
+          <td class="py-2 pr-3">${r.fmt(r.target)}</td>
+          <td class="py-2 pr-3">${r.fmt(r.actual)}</td>
+          <td class="py-2 pr-3 font-medium ${color}">${pct === null ? '—' : pct.toFixed(0) + '%'}</td>
+        </tr>`
+      }).join('')}</tbody>
+    </table>`
+  }
+
+  document.getElementById('mp_detail').innerHTML = `
+    <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <div class="flex items-start justify-between gap-4 mb-1">
+        <div>
+          <h3 class="text-sm font-semibold">${escapeHtml(plan.plan_title)}</h3>
+          <p class="text-xs text-gray-400">Shop: ${escapeHtml(plan.shop_name)} · Tháng ${plan.thang}/${plan.nam} (${plan.period_start} → ${plan.period_end})</p>
+        </div>
+        ${fileUrl ? `<a href="${fileUrl}" target="_blank" class="shrink-0 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600">⬇️ Tải file gốc (đầy đủ 14 sheet)</a>` : ''}
+      </div>
+      <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 mt-4">
+        ${items.map((i) => `<div class="rounded-lg border border-gray-200 dark:border-gray-800 p-3">
+          <p class="text-xs text-gray-400">${i.label}</p>
+          <p class="mt-1 text-base font-bold">${i.value}</p>
+        </div>`).join('')}
+      </div>
+    </div>
+
+    <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <h3 class="text-sm font-semibold mb-3">Mục tiêu theo Sản phẩm</h3>
+      <div class="overflow-x-auto"><table class="w-full text-left text-sm">
+        <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+          <th class="py-2 pr-3 font-medium text-gray-400">Sản phẩm</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">Ngân sách</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">ROAS mục tiêu</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">CPA mục tiêu</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">GMV kỳ vọng</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">Đơn kỳ vọng</th>
+        </tr></thead>
+        <tbody>${productRows}</tbody>
+      </table></div>
+    </div>
+
+    <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <h3 class="text-sm font-semibold mb-3">Phân bổ Ngân sách theo Giai đoạn</h3>
+      <div class="overflow-x-auto"><table class="w-full text-left text-sm">
+        <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+          <th class="py-2 pr-3 font-medium text-gray-400">Giai đoạn</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">Số ngày</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">Ngân sách</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">% Ngân sách</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">GMV kỳ vọng</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">Đơn kỳ vọng</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">ROAS kỳ vọng</th>
+          <th class="py-2 pr-3 font-medium text-gray-400">Vai trò</th>
+        </tr></thead>
+        <tbody>${phaseRows}</tbody>
+      </table></div>
+    </div>
+
+    <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+      <h3 class="text-sm font-semibold mb-1">Kế hoạch vs Thực tế</h3>
+      <p class="text-xs text-gray-400 mb-3">Đối chiếu mục tiêu với số liệu thực tế đã Upload cho cùng Shop/Tháng</p>
+      <div class="overflow-x-auto">${comparisonHtml}</div>
+    </div>`
 }
 
 /* -----------------------------------------------------------------------
