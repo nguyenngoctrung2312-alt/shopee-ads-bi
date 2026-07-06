@@ -1686,6 +1686,25 @@ function applyGlobalProductRatioOverride(mpEditRef, prodIdx, newRatio) {
   mpEditRef.dailyPlan.forEach((d) => { if (!d.locked) d.productRatioOverride = next.slice() })
 }
 
+/** Sua "Tong Ngan sach thang" tong the (o "Muc tieu" / "Thuc te sau dieu
+ * chinh" phia tren bang 31 ngay - ca 2 o cung dieu khien 1 gia tri nay) ->
+ * chia lai Ngan sach thang cho TUNG san pham theo DUNG ty le hien tai giua
+ * cac san pham (khong doi ty le tuong doi, chi doi TONG). Neu tong hien tai
+ * = 0 (vd moi Them san pham chua nhap Ngan sach) thi chia deu cho tat ca. */
+function applyMasterBudgetTarget(mpEditRef, newTotal) {
+  const products = mpEditRef.assumptions.products
+  if (!products.length) return
+  const clampedTotal = Math.max(0, newTotal)
+  const oldTotal = products.reduce((s, p) => s + (p.budgetMonthly || 0), 0)
+  if (oldTotal > 0) {
+    const scale = clampedTotal / oldTotal
+    products.forEach((p) => { p.budgetMonthly = Math.round((p.budgetMonthly || 0) * scale) })
+  } else {
+    const even = Math.round(clampedTotal / products.length)
+    products.forEach((p) => { p.budgetMonthly = even })
+  }
+}
+
 function buildPlanSummaryFields(assumptions, dailyPlan) {
   const plan = computePlan(assumptions, dailyPlan)
   const totalClick = plan.monthTotal.click
@@ -2477,6 +2496,8 @@ function handleMpFieldChange(e) {
   } else if (kind === 'phase-roas-target') {
     if (!mpEdit.assumptions.roasTargetByPhase) mpEdit.assumptions.roasTargetByPhase = {}
     mpEdit.assumptions.roasTargetByPhase[el.dataset.phase] = val === '' ? null : toFloatOrZero(val)
+  } else if (kind === 'master-budget-target') {
+    applyMasterBudgetTarget(mpEdit, toFloatOrZero(val))
   } else if (kind === 'day-phase') {
     mpEdit.dailyPlan[+el.dataset.idx].phase = val
   } else if (kind === 'day-weight') {
@@ -2706,7 +2727,15 @@ function renderMediaPlanDetail(preserveScroll) {
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
       <h3 class="text-sm font-semibold mb-1">Phân bổ Ngân sách 31 ngày (chỉnh sửa được)</h3>
       <p class="text-xs text-gray-400 mb-1">Đổi <b>Giai đoạn</b> mỗi ngày (Sale/Pre-heat/Sustain/Normal), sửa <b>Trọng số</b> riêng từng ngày, hoặc sửa <b>Ghi chú chiến lược</b>. Ngân sách/GMV/Đơn hàng/ROAS mỗi ngày tự tính theo Trọng số; sửa Trọng số ngày này sẽ tự chia lại tỷ lệ ngân sách các ngày khác — <b>Tổng ngân sách luôn giữ nguyên</b> bằng đúng Ngân sách tháng đã cấu hình.</p>
-      <p class="mb-3 text-sm">💰 Tổng ngân sách hiện tại: <b class="text-base">${formatVND(planResult.monthTotal.budget)}</b></p>
+      <div class="mb-3 flex flex-wrap items-center gap-4 text-sm">
+        <label class="flex items-center gap-2">🎯 Mục tiêu:
+          <input type="number" step="1000" data-mp="master-budget-target" value="${Math.round(assumptions.products.reduce((s, p) => s + (p.budgetMonthly || 0), 0))}" class="w-36 rounded border px-2 py-1 text-sm font-semibold border-gray-300 dark:border-gray-700 dark:bg-gray-800" title="Tổng Ngân sách tháng mục tiêu — sửa số này sẽ tự chia lại Ngân sách tháng của từng sản phẩm theo ĐÚNG tỷ lệ hiện tại giữa các sản phẩm" />
+        </label>
+        <label class="flex items-center gap-2">💰 Thực tế sau điều chỉnh:
+          <input type="number" step="1000" data-mp="master-budget-target" value="${Math.round(planResult.monthTotal.budget)}" class="w-36 rounded border px-2 py-1 text-sm font-semibold border-gray-300 dark:border-gray-700 dark:bg-gray-800" title="Tổng ngân sách thực tế sau khi tính toán từ Trọng số/Khóa/Tỉ lệ của bảng 31 ngày bên dưới — luôn khớp CHÍNH XÁC với ô Mục tiêu. Sửa số này cũng tương đương sửa ô Mục tiêu (2 ô cùng điều khiển 1 giá trị)." />
+        </label>
+      </div>
+      <p class="mb-3 text-[11px] text-gray-400">2 ô trên cùng điều khiển <b>1 Tổng ngân sách tháng duy nhất</b> (sửa ô nào cũng được, kết quả như nhau) — hệ thống luôn đảm bảo bảng 31 ngày bên dưới cộng lại đúng khớp số này, không lệch dù bạn Khóa/sửa Trọng số/Tỉ lệ bao nhiêu ngày.</p>
       ${mpDailyTableHTML(planResult, assumptions)}
     </div>
 
