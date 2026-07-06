@@ -1361,10 +1361,54 @@ function computePlan(assumptions, dailyPlan) {
     // Giai doan (applyPhaseBudgetPctOverride se ghi weightOverride hang loat).
     const isWeightOverridden = d.weightOverride !== null && d.weightOverride !== undefined
     const weight = isWeightOverridden ? d.weightOverride : autoWeight
-    return { ...d, isWeekend, weight, autoWeight, isWeightOverridden }
+    // Ngay bi KHOA (d.locked): Tong Ngan sach ngay do la 1 SO TUYET DOI CO
+    // DINH (d.lockedBudget), duoc CHOT tai thoi diem khoa - hoan toan KHONG
+    // phu thuoc Trong so/Tong Trong so cua CAC NGAY KHAC nua, dam bao gia tri
+    // nguoi dung da chot khong bao gio bi cac thao tac khac (sua % Ngan sach
+    // Giai doan, sua Ty le ap dung ca thang...) lam thay doi ngoai y muon.
+    const isLocked = !!d.locked && isFinite(d.lockedBudget) && d.lockedBudget >= 0
+    return { ...d, isWeekend, weight, autoWeight, isWeightOverridden, isLocked }
   })
-  const totalWeight = days.reduce((s, d) => s + d.weight, 0)
-  const unitPerWeight = products.map((p) => (totalWeight > 0 ? p.budgetMonthly / totalWeight : 0))
+  // Tong Trong so CHI tinh tren cac ngay TU DO (chua khoa) - ngay da khoa
+  // khong con tham gia vao co che phan bo theo Trong so nua.
+  const totalWeight = days.reduce((s, d) => (d.isLocked ? s : s + d.weight), 0)
+
+  const roasTargetByPhase = assumptions.roasTargetByPhase || {}
+  const crAdjustByPhase = {}
+
+  // Ty le % Ngan sach/ngay chia cho tung san pham: MAC DINH ty le thuan voi
+  // mang unitPerWeightArr truyen vao (xem duoi), nhung co the GHI DE rieng
+  // cho TUNG NGAY qua d.productRatioOverride (mang ty le, tong=1) - vd nguoi
+  // dung muon 1 ngay cu the danh 70% cho San pham A thay vi ty le mac dinh.
+  function dayProductRatio(d, idx, unitPerWeightArr) {
+    if (Array.isArray(d.productRatioOverride) && d.productRatioOverride.length === products.length) return d.productRatioOverride[idx]
+    const sum = unitPerWeightArr.reduce((s, v) => s + v, 0)
+    return sum > 0 ? unitPerWeightArr[idx] / sum : (1 / products.length)
+  }
+
+  // Ngan sach da bi cac ngay KHOA "chiem chỗ" truoc, tinh rieng cho tung san
+  // pham (dung ty le Ngan sach THANG lam co so du phong cho ngay khoa nao do
+  // chua tung co productRatioOverride rieng - truong hop hau nhu khong xay ra
+  // vi luc khoa da tu dong luu san Ty le hien tai).
+  const monthlyBudgetRatioBasis = products.map((p) => p.budgetMonthly || 0)
+  const lockedBudgetByProduct = products.map((p, idx) =>
+    days.reduce((s, d) => {
+      if (!d.isLocked) return s
+      const ratio = dayProductRatio(d, idx, monthlyBudgetRatioBasis)
+      return s + Math.round((d.lockedBudget * ratio) / 1000) * 1000
+    }, 0)
+  )
+  // Phan Ngan sach CON LAI (sau khi tru phan cac ngay Khoa) moi duoc phan bo
+  // theo Trong so cho cac ngay TU DO - dam bao Tong ca thang cua tung san
+  // pham vAn khop CHINH XAC voi Ngan sach thang da cau hinh du khoa bao nhieu
+  // ngay voi ty le nao.
+  const remainingBudget = products.map((p, idx) => Math.max(0, (p.budgetMonthly || 0) - lockedBudgetByProduct[idx]))
+  const unitPerWeight = remainingBudget.map((rb) => (totalWeight > 0 ? rb / totalWeight : 0))
+  const sumUnitPerWeight = unitPerWeight.reduce((s, v) => s + v, 0)
+
+  function dayTotalBudgetOf(d) {
+    return d.isLocked ? d.lockedBudget : d.weight * sumUnitPerWeight
+  }
 
   // Buoc 0: "ROAS muc tieu theo Giai doan" (tuy chon, assumptions.roasTargetByPhase[phase]).
   // ROAS ty le THUAN voi CR khi CPC/AOV/Ngan sach khong doi (ROAS=Click*CR*AOV/Ngan
@@ -1372,18 +1416,6 @@ function computePlan(assumptions, dailyPlan) {
   // Giai doan, chua dieu chinh) roi suy ra 1 he so nhan THEM vao CR
   // (crAdjust = ROAS_muc_tieu / ROAS_goc) de danh dung ROAS mong muon, khong
   // dong tac dong CPC/CTR/AOV.
-  const roasTargetByPhase = assumptions.roasTargetByPhase || {}
-  const crAdjustByPhase = {}
-  const sumUnitPerWeight = unitPerWeight.reduce((s, v) => s + v, 0)
-  // Ty le % Ngan sach/ngay chia cho tung san pham: MAC DINH ty le thuan voi
-  // Ngan sach thang cua tung san pham (unitPerWeight[idx]/tong), nhung co the
-  // GHI DE rieng cho TUNG NGAY qua d.productRatioOverride (mang ty le, tong=1)
-  // - vd nguoi dung muon 1 ngay cu the danh 70% cho San pham A thay vi ty le
-  // mac dinh theo Ngan sach thang.
-  function dayProductRatio(d, idx) {
-    if (Array.isArray(d.productRatioOverride) && d.productRatioOverride.length === products.length) return d.productRatioOverride[idx]
-    return sumUnitPerWeight > 0 ? unitPerWeight[idx] / sumUnitPerWeight : (1 / products.length)
-  }
   MP_PHASES.forEach((phase) => {
     const target = roasTargetByPhase[phase]
     if (target === null || target === undefined || !isFinite(target) || target <= 0) { crAdjustByPhase[phase] = 1; return }
@@ -1391,9 +1423,9 @@ function computePlan(assumptions, dailyPlan) {
     let sumBudget = 0, sumGmv = 0
     days.forEach((d) => {
       if (d.phase !== phase) return
-      const dayTotalBudget = d.weight * sumUnitPerWeight
+      const dayTotalBudget = dayTotalBudgetOf(d)
       products.forEach((p, idx) => {
-        const budget = Math.round((dayTotalBudget * dayProductRatio(d, idx)) / 1000) * 1000
+        const budget = Math.round((dayTotalBudget * dayProductRatio(d, idx, unitPerWeight)) / 1000) * 1000
         const cpc = p.cpc * mult.cpc
         const cr = p.cr * mult.cr
         const click = cpc > 0 ? budget / cpc : 0
@@ -1412,24 +1444,29 @@ function computePlan(assumptions, dailyPlan) {
   const perDayProduct = days.map((d) => {
     const mult = assumptions.phaseMultipliers[d.phase] || { cpc: 1, ctr: 1, cr: 1, atc: 1 }
     const crAdjust = crAdjustByPhase[d.phase] || 1
-    const dayTotalBudget = d.weight * sumUnitPerWeight
+    const dayTotalBudget = dayTotalBudgetOf(d)
     return products.map((p, idx) => ({
       name: p.name,
-      budget: Math.round((dayTotalBudget * dayProductRatio(d, idx)) / 1000) * 1000,
+      budget: Math.round((dayTotalBudget * dayProductRatio(d, idx, unitPerWeight)) / 1000) * 1000,
       cpc: p.cpc * mult.cpc, ctr: p.ctr * mult.ctr, cr: p.cr * mult.cr * crAdjust, atc: p.atc * mult.atc, aov: p.aov
     }))
   })
 
   // Buoc 2: HIEU CHINH LAM TRON - cong phan chenh lech (Ngan sach thang da
-  // nhap trừ Tong da lam tron) vao NGAY CO TRONG SO LON NHAT cua tung san
-  // pham (anh huong ty le % nho nhat), de TONG NGAN SACH luon khop CHINH XAC
-  // voi Ngan sach thang da cau hinh - du sua Trong so/% Ngan sach the nao.
+  // nhap trừ Tong da lam tron) vao 1 ngay TU DO (chua Khoa) CO TRONG SO LON
+  // NHAT cua tung san pham (anh huong ty le % nho nhat), de TONG NGAN SACH
+  // luon khop CHINH XAC voi Ngan sach thang da cau hinh - du sua Trong so/%
+  // Ngan sach/Khoa ngay the nao. Uu tien don vao ngay CHUA KHOA de KHONG lam
+  // sai lech gia tri cua ngay nguoi dung da CHOT CU DINH.
   products.forEach((p, prodIdx) => {
     const roundedSum = perDayProduct.reduce((s, dayArr) => s + dayArr[prodIdx].budget, 0)
     const diff = Math.round(p.budgetMonthly || 0) - roundedSum
     if (!diff) return
-    let targetIdx = 0, maxWeight = -Infinity
-    days.forEach((d, i) => { if (d.weight > maxWeight) { maxWeight = d.weight; targetIdx = i } })
+    const freeIdxs = []
+    days.forEach((d, i) => { if (!d.isLocked) freeIdxs.push(i) })
+    const pool = freeIdxs.length ? freeIdxs : days.map((_, i) => i)
+    let targetIdx = pool[0], maxWeight = -Infinity
+    pool.forEach((i) => { if (days[i].weight > maxWeight) { maxWeight = days[i].weight; targetIdx = i } })
     perDayProduct[targetIdx][prodIdx].budget += diff
   })
 
@@ -1535,16 +1572,20 @@ function computeHourly(assumptions, planResult, hourlyPlan) {
  * Ket qua: ghi weightOverride cho TUNG ngay thuoc giai doan nay. */
 function applyPhaseBudgetPctOverride(mpEditRef, phase, targetPct) {
   const planResult = computePlan(mpEditRef.assumptions, mpEditRef.dailyPlan)
-  const daysInPhase = planResult.rows.filter((r) => r.phase === phase)
+  // CHI tinh/chia lai tren cac ngay CHUA KHOA - ngay da Khoa (r.isLocked) giu
+  // nguyen Tong NS co dinh, khong tham gia vao viec chia lai % Giai doan nay.
+  const daysInPhase = planResult.rows.filter((r) => r.phase === phase && !r.isLocked)
   if (!daysInPhase.length) {
-    alert(`Giai đoạn "${phase}" hiện chưa có ngày nào — hãy đổi Giai đoạn cho ít nhất 1 ngày sang "${phase}" trước khi sửa % Ngân sách.`)
+    alert(`Giai đoạn "${phase}" hiện không có ngày nào (chưa khóa) để chia lại — hãy đổi Giai đoạn cho ít nhất 1 ngày chưa khóa sang "${phase}", hoặc mở khóa bớt ngày, trước khi sửa % Ngân sách.`)
     return
   }
   const weightPhaseOld = daysInPhase.reduce((s, r) => s + r.weight, 0)
+  // planResult.totalWeight da CHI tinh tren cac ngay TU DO (xem computePlan)
+  // nen otherWeight o day cung tu dong loai bo dung ca ngay khoa.
   const otherWeight = planResult.totalWeight - weightPhaseOld
   const clampedPct = Math.min(Math.max(targetPct, 0.001), 0.95)
   if (otherWeight <= 0) {
-    alert('Không thể đổi % vì giai đoạn này đang chiếm 100% ngân sách (không còn giai đoạn nào khác để cân đối).')
+    alert('Không thể đổi % vì giai đoạn này đang chiếm 100% ngân sách các ngày chưa khóa (không còn giai đoạn nào khác để cân đối).')
     return
   }
   const weightPhaseNew = (clampedPct * otherWeight) / (1 - clampedPct)
@@ -1552,28 +1593,36 @@ function applyPhaseBudgetPctOverride(mpEditRef, phase, targetPct) {
 
   mpEditRef.dailyPlan.forEach((d, idx) => {
     if (d.phase !== phase) return
+    if (planResult.rows[idx].isLocked) return // giu nguyen ngay da khoa
     const currentWeight = planResult.rows[idx].weight
     d.weightOverride = Number((currentWeight * scale).toFixed(4))
   })
 }
 
-/** Sua truc tiep "Tong NS" cua 1 ngay cu the -> tinh NGUOC ra Trong so can
+/** Sua truc tiep "Tong NS" cua 1 ngay CHUA KHOA -> tinh NGUOC ra Trong so can
  * co de dat dung so tien do (2 chieu voi "day-weight": sua o nao thi o kia
- * tu dong theo). Vi TongNS_ngay(w) = w * TongNganSachThang / TongTrongSo,
- * va sua w cua 1 ngay se lam doi TongTrongSo, cong thuc duoc giai NGUOC
- * CHINH XAC (khong xap xi) tu quan he:
- *   desired = w' * BUDGET / (TongTrongSoCu - w_cu + w') */
+ * tu dong theo). Vi TongNS_ngay(w) = w * NganSachConLai / TongTrongSoTuDo
+ * (NganSachConLai = Tong Ngan sach thang TRU phan da bi cac ngay Khoa chiem
+ * cho san - xem computePlan), va sua w cua 1 ngay se lam doi TongTrongSoTuDo,
+ * cong thuc duoc giai NGUOC CHINH XAC (khong xap xi) tu quan he:
+ *   desired = w' * NganSachConLai / (TongTrongSoTuDoCu - w_cu + w') */
 function applyDayBudgetOverride(mpEditRef, dayIdx, desiredBudget) {
   const totalMonthlyBudget = mpEditRef.assumptions.products.reduce((s, p) => s + (p.budgetMonthly || 0), 0)
   if (totalMonthlyBudget <= 0) return
   const planResult = computePlan(mpEditRef.assumptions, mpEditRef.dailyPlan)
   const row = planResult.rows[dayIdx]
-  if (!row) return
+  if (!row || row.isLocked) return // Ngay dang Khoa: sua Tong NS duoc xu ly rieng trong handleMpFieldChange (cap nhat thang lockedBudget)
   const wOld = row.weight
-  const totalWeightOld = planResult.totalWeight
-  const denom = totalMonthlyBudget - desiredBudget
+  const totalWeightOld = planResult.totalWeight // da CHI tinh tren cac ngay TU DO (chua khoa)
+  // Ngan sach con lai danh cho cac ngay TU DO = Tong Ngan sach thang - Tong
+  // cac Tong NS da CHOT CO DINH cua cac ngay Khoa (sai so lam tron rat nho
+  // do chia theo ty le tung san pham se duoc Buoc 2 trong computePlan tu
+  // dong hieu chinh chinh xac lai o cap Tong ca thang).
+  const lockedSum = mpEditRef.dailyPlan.reduce((s, d) => s + ((d.locked && isFinite(d.lockedBudget)) ? d.lockedBudget : 0), 0)
+  const remainingBudget = totalMonthlyBudget - lockedSum
+  const denom = remainingBudget - desiredBudget
   if (denom <= 0) {
-    alert('Ngân sách của 1 ngày phải nhỏ hơn Tổng ngân sách tháng.')
+    alert('Ngân sách của 1 ngày phải nhỏ hơn phần Ngân sách còn lại chưa bị khóa bởi các ngày khác.')
     return
   }
   let wNew = (desiredBudget * (totalWeightOld - wOld)) / denom
@@ -1632,7 +1681,9 @@ function applyGlobalProductRatioOverride(mpEditRef, prodIdx, newRatio) {
     if (i === prodIdx) return clamped
     return othersSum > 0 ? (v / othersSum) * remaining : remaining / (n - 1)
   })
-  mpEditRef.dailyPlan.forEach((d) => { d.productRatioOverride = next.slice() })
+  // Bo qua cac ngay da KHOA - Ty le (va Tong NS) cua ngay khoa phai giu
+  // nguyen, khong bi ghi de boi thao tac ap dung hang loat nay.
+  mpEditRef.dailyPlan.forEach((d) => { if (!d.locked) d.productRatioOverride = next.slice() })
 }
 
 function buildPlanSummaryFields(assumptions, dailyPlan) {
@@ -2291,7 +2342,7 @@ function mpDailyTableHTML(planResult, assumptions) {
         <div class="mt-0.5 font-medium">${formatVND(pp.budget)}</div>
       </td>`
     }).join('')
-    return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0 ${MP_PHASE_BADGE[r.phase] || ''}">
+    return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0 ${MP_PHASE_BADGE[r.phase] || ''} ${r.isLocked ? 'ring-1 ring-inset ring-emerald-400' : ''}">
       <td class="py-1.5 pr-2 whitespace-nowrap">${da}/${mo} <span class="text-gray-400">(${dow})</span></td>
       <td class="py-1.5 pr-2">
         <select data-mp="day-phase" data-idx="${idx}" class="rounded border px-1.5 py-1 text-xs border-gray-300 dark:border-gray-700 dark:bg-gray-800">
@@ -2299,13 +2350,17 @@ function mpDailyTableHTML(planResult, assumptions) {
         </select>
       </td>
       <td class="py-1.5 pr-2 text-gray-400 whitespace-nowrap">${dayType}</td>
+      <td class="py-1.5 pr-2 text-center whitespace-nowrap">
+        <input type="checkbox" data-mp="day-lock" data-idx="${idx}" ${r.isLocked ? 'checked' : ''} class="h-4 w-4 align-middle" title="${r.isLocked ? 'Đã khóa: Tổng NS/Tỉ lệ của ngày này sẽ KHÔNG đổi dù bạn sửa % Ngân sách theo Giai đoạn, Tỉ lệ áp cho cả tháng, hay bất kỳ ngày nào khác. Bỏ tick để mở khóa.' : 'Tick để khóa CỐ ĐỊNH Tổng NS + Tỉ lệ hiện tại của ngày này — các thao tác hàng loạt khác (sửa % Giai đoạn, Tỉ lệ cả tháng...) sẽ không đụng tới ngày đã khóa.'}" />
+        ${r.isLocked ? '<div class="mt-0.5 text-[10px] text-emerald-600">🔒 Đã khóa</div>' : ''}
+      </td>
       <td class="py-1.5 pr-2 whitespace-nowrap">
-        <input type="number" step="0.01" data-mp="day-weight" data-idx="${idx}" value="${r.weight.toFixed(2)}" class="w-16 rounded border px-1.5 py-1 text-xs ${r.isWeightOverridden ? 'border-amber-400' : 'border-gray-300 dark:border-gray-700'} dark:bg-gray-800" title="${r.isWeightOverridden ? 'Đang ghi đè thủ công (tự động theo Giai đoạn = ' + r.autoWeight.toFixed(2) + ')' : 'Tự động theo Giai đoạn — sửa để ghi đè riêng ngày này'}" />
-        ${r.isWeightOverridden ? `<button type="button" data-mp-action="reset-day-weight" data-idx="${idx}" class="text-[10px] text-gray-400 hover:text-gray-600" title="Đặt lại tự động (=${r.autoWeight.toFixed(2)})">↺</button>` : ''}
+        <input type="number" step="0.01" data-mp="day-weight" data-idx="${idx}" value="${r.weight.toFixed(2)}" ${r.isLocked ? 'disabled' : ''} class="w-16 rounded border px-1.5 py-1 text-xs ${r.isLocked ? 'opacity-50 cursor-not-allowed border-gray-300 dark:border-gray-700' : (r.isWeightOverridden ? 'border-amber-400' : 'border-gray-300 dark:border-gray-700')} dark:bg-gray-800" title="${r.isLocked ? 'Ngày đã khóa — bỏ tick Khóa để sửa lại Trọng số' : (r.isWeightOverridden ? 'Đang ghi đè thủ công (tự động theo Giai đoạn = ' + r.autoWeight.toFixed(2) + ')' : 'Tự động theo Giai đoạn — sửa để ghi đè riêng ngày này')}" />
+        ${(!r.isLocked && r.isWeightOverridden) ? `<button type="button" data-mp-action="reset-day-weight" data-idx="${idx}" class="text-[10px] text-gray-400 hover:text-gray-600" title="Đặt lại tự động (=${r.autoWeight.toFixed(2)})">↺</button>` : ''}
       </td>
       ${productCells}
       <td class="py-1.5 pr-2 font-medium whitespace-nowrap">
-        <input type="number" step="1000" data-mp="day-budget" data-idx="${idx}" value="${Math.round(r.totalBudget)}" class="w-24 rounded border px-1.5 py-1 text-xs border-gray-300 dark:border-gray-700 dark:bg-gray-800" title="Sửa Tổng ngân sách ngày này sẽ tự tính lại Trọng số tương ứng (và ngược lại)" />
+        <input type="number" step="1000" data-mp="day-budget" data-idx="${idx}" value="${Math.round(r.totalBudget)}" class="w-24 rounded border px-1.5 py-1 text-xs ${r.isLocked ? 'border-emerald-400' : 'border-gray-300 dark:border-gray-700'} dark:bg-gray-800" title="${r.isLocked ? 'Ngày đã khóa — sửa số ở đây sẽ cập nhật LUÔN giá trị khóa (số cố định mới)' : 'Sửa Tổng ngân sách ngày này sẽ tự tính lại Trọng số tương ứng (và ngược lại)'}" />
       </td>
       <td class="py-1.5 pr-2 whitespace-nowrap">${formatNumber(r.totalImpr)}</td>
       <td class="py-1.5 pr-2 whitespace-nowrap">${formatNumber(r.totalClick)}</td>
@@ -2325,6 +2380,7 @@ function mpDailyTableHTML(planResult, assumptions) {
       <th class="py-2 pr-2 font-medium text-gray-400">Ngày</th>
       <th class="py-2 pr-2 font-medium text-gray-400">Giai đoạn</th>
       <th class="py-2 pr-2 font-medium text-gray-400">Loại ngày</th>
+      <th class="py-2 pr-2 font-medium text-gray-400">Khóa</th>
       <th class="py-2 pr-2 font-medium text-gray-400">Trọng số</th>
       ${productCols}
       <th class="py-2 pr-2 font-medium text-gray-400">Tổng NS (sửa được)</th>
@@ -2340,7 +2396,8 @@ function mpDailyTableHTML(planResult, assumptions) {
     </tr></thead>
     <tbody>${rows}</tbody>
   </table></div>
-  <p class="mt-2 text-[11px] text-gray-400">Sửa <b>Trọng số</b> hoặc <b>Tổng NS</b> của 1 ngày đều được — sửa cái nào thì cái còn lại tự tính lại theo đúng cái đó (2 ô là 2 cách nhập cho cùng 1 giá trị). Mỗi ô <b>Tỉ lệ %</b> dưới cột sản phẩm là % của Tổng NS ngày đó dành cho sản phẩm tương ứng — mặc định chia theo tỉ lệ Ngân sách tháng đã cấu hình, sửa riêng 1 ô sẽ tự chia lại tỉ lệ các sản phẩm còn lại để luôn tổng = 100%.</p>`
+  <p class="mt-2 text-[11px] text-gray-400">Sửa <b>Trọng số</b> hoặc <b>Tổng NS</b> của 1 ngày đều được — sửa cái nào thì cái còn lại tự tính lại theo đúng cái đó (2 ô là 2 cách nhập cho cùng 1 giá trị). Mỗi ô <b>Tỉ lệ %</b> dưới cột sản phẩm là % của Tổng NS ngày đó dành cho sản phẩm tương ứng — mặc định chia theo tỉ lệ Ngân sách tháng đã cấu hình, sửa riêng 1 ô sẽ tự chia lại tỉ lệ các sản phẩm còn lại để luôn tổng = 100%.</p>
+  <p class="mt-1 text-[11px] text-gray-400">🔒 <b>Khóa</b>: tick vào ô Khóa của 1 ngày để CỐ ĐỊNH Tổng NS + Tỉ lệ hiện tại của ngày đó — từ lúc này, mọi thao tác hàng loạt khác (sửa % Ngân sách theo Giai đoạn, sửa Tỉ lệ áp cho cả tháng ở tiêu đề...) sẽ <b>bỏ qua ngày đã khóa</b>, chỉ chia lại phần ngân sách còn lại cho các ngày chưa khóa — <b>Tổng ngân sách tháng vẫn luôn khớp chính xác</b>. Bạn vẫn có thể tự sửa trực tiếp Tổng NS của 1 ngày đã khóa bất cứ lúc nào (số mới sẽ thay cho số cũ đã khóa).</p>`
 }
 
 function mpHourlyTableHTML(groupKey, groupLabel, hourlyResult, planResult) {
@@ -2425,7 +2482,34 @@ function handleMpFieldChange(e) {
   } else if (kind === 'day-weight') {
     mpEdit.dailyPlan[+el.dataset.idx].weightOverride = toFloatOrZero(val)
   } else if (kind === 'day-budget') {
-    applyDayBudgetOverride(mpEdit, +el.dataset.idx, toFloatOrZero(val))
+    const dIdx = +el.dataset.idx
+    const day = mpEdit.dailyPlan[dIdx]
+    const desired = toFloatOrZero(val)
+    if (day.locked) {
+      // Ngay dang KHOA: sua o nay tuc la CAP NHAT LUON gia tri co dinh moi
+      // (khong quay lai co che phan bo theo Trong so).
+      day.lockedBudget = Math.round(desired)
+    } else {
+      applyDayBudgetOverride(mpEdit, dIdx, desired)
+    }
+  } else if (kind === 'day-lock') {
+    const dIdx = +el.dataset.idx
+    const day = mpEdit.dailyPlan[dIdx]
+    if (el.checked) {
+      // Khoa ngay nay: CHOT gia tri Tong Ngan sach + Ty le hien tai (tinh tu
+      // trang thai hien hanh cua ke hoach) thanh so TUYET DOI co dinh, tu day
+      // ve sau se KHONG doi du cac thao tac hang loat khac tac dong the nao.
+      const planResult = computePlan(mpEdit.assumptions, mpEdit.dailyPlan)
+      const row = planResult.rows[dIdx]
+      day.locked = true
+      day.lockedBudget = Math.round(row.totalBudget)
+      if (!Array.isArray(day.productRatioOverride) || day.productRatioOverride.length !== mpEdit.assumptions.products.length) {
+        day.productRatioOverride = row.perProduct.map((pp) => (row.totalBudget > 0 ? pp.budget / row.totalBudget : 1 / row.perProduct.length))
+      }
+    } else {
+      day.locked = false
+      day.lockedBudget = null
+    }
   } else if (kind === 'day-product-ratio') {
     applyDayProductRatioOverride(mpEdit, +el.dataset.idx, +el.dataset.pidx, toFloatOrZero(val) / 100)
   } else if (kind === 'global-product-ratio') {
