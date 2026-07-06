@@ -14,7 +14,18 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2/dist/chartjs-plugin-datalabels.min.js"></script>
 
+<script>
+  // Dang ky Plugin Datalabels TOAN CUC nhung mac dinh TAT (display:false) -
+  // chi bat rieng cho tung bieu do duong line can hien so lieu truc tiep
+  // (yeu cau: "chart số liệu cần phải thể hiện ra luôn không có dấu hay ẩn đi"),
+  // tranh lam roi cac bieu do bar/pie khong can thiet.
+  if (typeof ChartDataLabels !== 'undefined' && typeof Chart !== 'undefined') {
+    Chart.register(ChartDataLabels)
+    Chart.defaults.set('plugins.datalabels', { display: false })
+  }
+</script>
 <script>
   // Cau hinh Tailwind: Dark Mode theo class + mau thuong hieu mac dinh.
   // Doi cac ma mau "brand" o day khi co Logo cong ty chinh thuc.
@@ -406,6 +417,14 @@ function topN(rows, keyFn, n, sortKey) {
 const formatVND = (v) => new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND', maximumFractionDigits: 0 }).format(v || 0)
 const formatNumber = (v) => new Intl.NumberFormat('vi-VN').format(Math.round(v || 0))
 const formatPercent = (v) => `${(v || 0).toFixed(2)}%`
+// So gon cho nhan Datalabels tren chart (tranh chu qua dai chong len nhau)
+const formatCompact = (v) => {
+  const n = Number(v) || 0
+  const abs = Math.abs(n)
+  if (abs >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'tr'
+  if (abs >= 1000) return Math.round(n / 1000) + 'k'
+  return formatNumber(n)
+}
 
 /* -----------------------------------------------------------------------
    5. AUTH (Supabase Auth email/password)
@@ -415,21 +434,30 @@ let currentSession = null
 async function initAuth() {
   const { data } = await sb.auth.getSession()
   currentSession = data.session
-  sb.auth.onAuthStateChange((_event, session) => {
+  sb.auth.onAuthStateChange((event, session) => {
     currentSession = session
-    renderAuthState()
+    // CHI dieu huong ve Dashboard khi that su DANG NHAP hoac DANG XUAT.
+    // Supabase tu dong ban su kien TOKEN_REFRESHED dinh ky (vai chuc phut/lan)
+    // va USER_UPDATED/INITIAL_SESSION trong luc dang thao tac - neu goi
+    // goToPage('dashboard') o nhung su kien nay se lam mat trang dang xem
+    // (vi du dang sua Ke hoach thang) mot cach khong mong muon.
+    if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') {
+      renderAuthState(true)
+    } else {
+      renderAuthState(false)
+    }
   })
-  renderAuthState()
+  renderAuthState(true)
 }
 
-function renderAuthState() {
+function renderAuthState(shouldNavigate) {
   const loginScreen = document.getElementById('loginScreen')
   const appShell = document.getElementById('appShell')
   if (currentSession) {
     loginScreen.classList.add('hidden-important')
     appShell.classList.remove('hidden-important')
     document.getElementById('userEmailLabel').textContent = currentSession.user.email
-    goToPage('dashboard')
+    if (shouldNavigate) goToPage('dashboard')
   } else {
     appShell.classList.add('hidden-important')
     loginScreen.classList.remove('hidden-important')
@@ -766,7 +794,7 @@ function renderTrendCharts(trendData, groupBy) {
       { label: 'Doanh thu', data: trendData.map((d) => d.revenue), borderColor: '#EE4D2D', backgroundColor: '#EE4D2D', tension: 0.3 },
       { label: 'Chi phí', data: trendData.map((d) => d.cost), borderColor: '#3B82F6', backgroundColor: '#3B82F6', tension: 0.3 }
     ] },
-    options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+    options: { responsive: true, plugins: { legend: { position: 'bottom' }, datalabels: { display: true, align: 'top', anchor: 'end', font: { size: 9 }, formatter: (v) => formatCompact(v) } } }
   })
 
   destroyChart('roasAcos')
@@ -776,7 +804,7 @@ function renderTrendCharts(trendData, groupBy) {
       { label: 'ROAS (x)', data: trendData.map((d) => d.roas), borderColor: '#10B981', backgroundColor: '#10B981', tension: 0.3 },
       { label: 'ACOS (%)', data: trendData.map((d) => d.acos), borderColor: '#F59E0B', backgroundColor: '#F59E0B', tension: 0.3 }
     ] },
-    options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+    options: { responsive: true, plugins: { legend: { position: 'bottom' }, datalabels: { display: true, align: 'top', anchor: 'end', font: { size: 9 }, formatter: (v) => (Number(v) || 0).toFixed(1) } } }
   })
 }
 
@@ -1452,21 +1480,24 @@ function computePlan(assumptions, dailyPlan) {
     }))
   })
 
-  // Buoc 2: HIEU CHINH LAM TRON - cong phan chenh lech (Ngan sach thang da
-  // nhap trừ Tong da lam tron) vao 1 ngay TU DO (chua Khoa) CO TRONG SO LON
-  // NHAT cua tung san pham (anh huong ty le % nho nhat), de TONG NGAN SACH
-  // luon khop CHINH XAC voi Ngan sach thang da cau hinh - du sua Trong so/%
-  // Ngan sach/Khoa ngay the nao. Uu tien don vao ngay CHUA KHOA de KHONG lam
-  // sai lech gia tri cua ngay nguoi dung da CHOT CU DINH.
+  // Buoc 2: HIEU CHINH LAM TRON - CHI hieu chinh phan lam tron cua CAC NGAY
+  // TU DO so voi phan Ngan sach con lai danh cho chung (remainingBudget), TUYET
+  // DOI KHONG dung buoc nay de "ep" Tong ca thang khop budgetMonthly bang moi
+  // gia - vi neu cac ngay da KHOA cong lai da VUOT qua budgetMonthly cua 1 san
+  // pham (nguoi dung tu nhap/khoa qua nhieu), thi Tong ca thang PHAI duoc phep
+  // hien thi VUOT (hoac THIEU) that su, de nguoi dung nhin thay va tu dieu
+  // chinh, thay vi bi he thong am tham "dun" phan chenh lech qua 1 ngay TU DO
+  // khac lam sai lech ngoai y muon (hoac lam am ngan sach ngay do).
   products.forEach((p, prodIdx) => {
-    const roundedSum = perDayProduct.reduce((s, dayArr) => s + dayArr[prodIdx].budget, 0)
-    const diff = Math.round(p.budgetMonthly || 0) - roundedSum
-    if (!diff) return
     const freeIdxs = []
     days.forEach((d, i) => { if (!d.isLocked) freeIdxs.push(i) })
-    const pool = freeIdxs.length ? freeIdxs : days.map((_, i) => i)
-    let targetIdx = pool[0], maxWeight = -Infinity
-    pool.forEach((i) => { if (days[i].weight > maxWeight) { maxWeight = days[i].weight; targetIdx = i } })
+    if (!freeIdxs.length) return // Tat ca da Khoa - chap nhan Tong hien tai (co the vuot/thieu so voi Muc tieu), khong con ngay tu do de chinh
+    const roundedFreeSum = freeIdxs.reduce((s, i) => s + perDayProduct[i][prodIdx].budget, 0)
+    const targetFreeSum = Math.round(remainingBudget[prodIdx] || 0)
+    const diff = targetFreeSum - roundedFreeSum
+    if (!diff) return
+    let targetIdx = freeIdxs[0], maxWeight = -Infinity
+    freeIdxs.forEach((i) => { if (days[i].weight > maxWeight) { maxWeight = days[i].weight; targetIdx = i } })
     perDayProduct[targetIdx][prodIdx].budget += diff
   })
 
@@ -2727,15 +2758,28 @@ function renderMediaPlanDetail(preserveScroll) {
     <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
       <h3 class="text-sm font-semibold mb-1">Phân bổ Ngân sách 31 ngày (chỉnh sửa được)</h3>
       <p class="text-xs text-gray-400 mb-1">Đổi <b>Giai đoạn</b> mỗi ngày (Sale/Pre-heat/Sustain/Normal), sửa <b>Trọng số</b> riêng từng ngày, hoặc sửa <b>Ghi chú chiến lược</b>. Ngân sách/GMV/Đơn hàng/ROAS mỗi ngày tự tính theo Trọng số; sửa Trọng số ngày này sẽ tự chia lại tỷ lệ ngân sách các ngày khác — <b>Tổng ngân sách luôn giữ nguyên</b> bằng đúng Ngân sách tháng đã cấu hình.</p>
-      <div class="mb-3 flex flex-wrap items-center gap-4 text-sm">
+      ${(() => {
+        const masterTarget = Math.round(assumptions.products.reduce((s, p) => s + (p.budgetMonthly || 0), 0))
+        const actualTotal = Math.round(planResult.monthTotal.budget)
+        const delta = actualTotal - masterTarget
+        let deltaHtml
+        if (Math.abs(delta) < 500) {
+          deltaHtml = '<span class="text-green-600">✅ Khớp chính xác với Mục tiêu</span>'
+        } else if (delta > 0) {
+          deltaHtml = `<span class="text-red-600">⚠️ Đang VƯỢT Mục tiêu ${formatVND(delta)} — các ngày đã Khóa/nhập tay đang cộng lại nhiều hơn Mục tiêu, hãy giảm bớt 1 vài ngày hoặc tăng Mục tiêu</span>`
+        } else {
+          deltaHtml = `<span class="text-amber-600">🟡 Còn dư ${formatVND(-delta)} CHƯA phân bổ hết — các ngày Tự do (chưa khóa) đang không đủ để dùng hết Mục tiêu, hoặc bạn có thể giảm Mục tiêu cho khớp</span>`
+        }
+        return `<div class="mb-1 flex flex-wrap items-center gap-4 text-sm">
         <label class="flex items-center gap-2">🎯 Mục tiêu:
-          <input type="number" step="1000" data-mp="master-budget-target" value="${Math.round(assumptions.products.reduce((s, p) => s + (p.budgetMonthly || 0), 0))}" class="w-36 rounded border px-2 py-1 text-sm font-semibold border-gray-300 dark:border-gray-700 dark:bg-gray-800" title="Tổng Ngân sách tháng mục tiêu — sửa số này sẽ tự chia lại Ngân sách tháng của từng sản phẩm theo ĐÚNG tỷ lệ hiện tại giữa các sản phẩm" />
+          <input type="number" step="1000" data-mp="master-budget-target" value="${masterTarget}" class="w-36 rounded border px-2 py-1 text-sm font-semibold border-gray-300 dark:border-gray-700 dark:bg-gray-800" title="Tổng Ngân sách tháng mục tiêu — sửa số này sẽ tự chia lại Ngân sách tháng của từng sản phẩm theo ĐÚNG tỷ lệ hiện tại giữa các sản phẩm" />
         </label>
-        <label class="flex items-center gap-2">💰 Thực tế sau điều chỉnh:
-          <input type="number" step="1000" data-mp="master-budget-target" value="${Math.round(planResult.monthTotal.budget)}" class="w-36 rounded border px-2 py-1 text-sm font-semibold border-gray-300 dark:border-gray-700 dark:bg-gray-800" title="Tổng ngân sách thực tế sau khi tính toán từ Trọng số/Khóa/Tỉ lệ của bảng 31 ngày bên dưới — luôn khớp CHÍNH XÁC với ô Mục tiêu. Sửa số này cũng tương đương sửa ô Mục tiêu (2 ô cùng điều khiển 1 giá trị)." />
-        </label>
+        <span class="flex items-center gap-2">💰 Thực tế sau điều chỉnh: <b class="text-base">${formatVND(actualTotal)}</b>
+          <span class="text-[11px] text-gray-400" title="Tự động tổng lại toàn bộ cột Tổng NS của bảng 31 ngày bên dưới (bao gồm cả các ngày đã Khóa) — số này KHÔNG bị ép khớp Mục tiêu, để bạn biết chính xác đang vượt hay chưa dùng hết ngân sách.">(tự tổng từ cột Tổng NS)</span>
+        </span>
       </div>
-      <p class="mb-3 text-[11px] text-gray-400">2 ô trên cùng điều khiển <b>1 Tổng ngân sách tháng duy nhất</b> (sửa ô nào cũng được, kết quả như nhau) — hệ thống luôn đảm bảo bảng 31 ngày bên dưới cộng lại đúng khớp số này, không lệch dù bạn Khóa/sửa Trọng số/Tỉ lệ bao nhiêu ngày.</p>
+      <p class="mb-3 text-sm">${deltaHtml}</p>`
+      })()}
       ${mpDailyTableHTML(planResult, assumptions)}
     </div>
 
@@ -2947,8 +2991,21 @@ function adsAnalysisSkeletonHTML() {
 
   <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
     <h3 class="text-sm font-semibold mb-1">Bảng so sánh hiệu quả Ads giữa các ngày</h3>
-    <p class="text-xs text-gray-400 mb-3">Đối chiếu từng ngày với ngày liền trước, kèm đánh giá/lời khuyên tự động dựa trên chuẩn ngành.</p>
+    <p class="text-xs text-gray-400 mb-3">Đối chiếu từng ngày với ngày liền trước, kèm đánh giá/lời khuyên tự động dựa trên chuẩn ngành. Hàng TOTAL cuối bảng: Chi phí/Doanh số/Lượt hiển thị/Lượt click/Đơn hàng là TỔNG, các chỉ số còn lại là TRUNG BÌNH cả kỳ.</p>
     <div id="aa_dailyTable" class="overflow-x-auto"></div>
+  </div>
+
+  <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <h3 class="text-sm font-semibold mb-1">📊 Tóm tắt & xu hướng nhanh</h3>
+    <p class="text-xs text-gray-400 mb-3">Tổng quan cả kỳ và diễn biến Chi phí/Doanh số/ROAS theo ngày (bấm vào tên trong chú thích để ẩn/hiện từng đường).</p>
+    <div id="aa_summaryBottomCards" class="mb-4"></div>
+    <canvas id="aa_chartSummary" height="80"></canvas>
+  </div>
+
+  <div class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
+    <h3 class="text-sm font-semibold mb-1">📅 Phân bổ ngân sách theo tuần: Kế hoạch vs Thực tế</h3>
+    <p class="text-xs text-gray-400 mb-3">Dựa trên Kế hoạch tháng đã lưu, đối chiếu Chi phí/Doanh số thực tế từng tuần so với kế hoạch để biết mục tiêu tuần có đạt hay không. Cần có Kế hoạch tháng đã lưu cho cùng Shop/Tháng/Năm.</p>
+    <div id="aa_weeklyAlloc" class="overflow-x-auto"></div>
   </div>
 
   <div id="aa_detail" class="card p-4 bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
@@ -3142,7 +3199,14 @@ function renderAaTrendChart(dailyRows) {
       { label: 'ROAS (x)', data: dailyRows.map((d) => d.roas), borderColor: '#10B981', backgroundColor: '#10B981', tension: 0.3, yAxisID: 'y1' }
     ] },
     options: {
-      responsive: true, plugins: { legend: { position: 'bottom' } },
+      responsive: true,
+      plugins: {
+        legend: { position: 'bottom' },
+        datalabels: {
+          display: true, align: 'top', anchor: 'end', font: { size: 9 },
+          formatter: (v, ctx) => ctx.dataset.yAxisID === 'y1' ? (Number(v) || 0).toFixed(1) : formatCompact(v)
+        }
+      },
       scales: {
         y: { position: 'left', title: { display: true, text: 'đ' } },
         y1: { position: 'right', title: { display: true, text: 'ROAS (x)' }, grid: { drawOnChartArea: false } }
@@ -3190,7 +3254,34 @@ function aaDailyTableHTML(dailyRows) {
         <td class="py-1.5 pr-3 whitespace-nowrap">${formatNumber(d.orders)}</td>
         <td class="py-1.5 pr-3 text-xs text-gray-600 dark:text-gray-300">${escapeHtml(aaDailyAdvice(d, prev))}</td>
       </tr>`
-    }).join('')}</tbody></table>`
+    }).join('')}</tbody>
+    <tfoot>${(() => {
+      const n = dailyRows.length
+      const sum = (k) => dailyRows.reduce((s, d) => s + (Number(d[k]) || 0), 0)
+      const totalImpr = sum('impressions'), totalClicks = sum('clicks'), totalCost = sum('cost'), totalRevenue = sum('revenue'), totalOrders = sum('orders')
+      const totalRoas = totalCost > 0 ? totalRevenue / totalCost : 0
+      const totalAcos = totalRevenue > 0 ? (totalCost / totalRevenue) * 100 : 0
+      const avgCtr = totalImpr > 0 ? (totalClicks / totalImpr) * 100 : 0
+      const avgCr = totalClicks > 0 ? (totalOrders / totalClicks) * 100 : 0
+      const avgCpc = totalClicks > 0 ? totalCost / totalClicks : 0
+      const avgCpa = totalOrders > 0 ? totalCost / totalOrders : 0
+      return `<tr class="border-t-2 border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800/60 font-semibold">
+        <td class="py-2 pr-3 whitespace-nowrap">TOTAL (${n} ngày)</td>
+        <td class="py-2 pr-3 whitespace-nowrap">${formatNumber(totalImpr)}</td>
+        <td class="py-2 pr-3 whitespace-nowrap">${formatNumber(totalClicks)}</td>
+        <td class="py-2 pr-3 whitespace-nowrap">${formatVND(totalCost)}</td>
+        <td class="py-2 pr-3 whitespace-nowrap">${formatVND(totalRevenue)}</td>
+        <td class="py-2 pr-3 whitespace-nowrap">${totalRoas.toFixed(2)}x</td>
+        <td class="py-2 pr-3 whitespace-nowrap text-gray-400">—</td>
+        <td class="py-2 pr-3 whitespace-nowrap">${formatPercent(totalAcos)}</td>
+        <td class="py-2 pr-3 whitespace-nowrap">${formatPercent(avgCtr)}</td>
+        <td class="py-2 pr-3 whitespace-nowrap">${formatPercent(avgCr)}</td>
+        <td class="py-2 pr-3 whitespace-nowrap">${formatVND(avgCpc)}</td>
+        <td class="py-2 pr-3 whitespace-nowrap">${formatVND(avgCpa)}</td>
+        <td class="py-2 pr-3 whitespace-nowrap">${formatNumber(totalOrders)}</td>
+        <td class="py-2 pr-3 text-xs text-gray-400">Chi phí/Doanh số/Lượt hiển thị/Lượt click/Đơn hàng: TỔNG — các chỉ số còn lại: TRUNG BÌNH cả kỳ</td>
+      </tr>`
+    })()}</tfoot></table>`
 }
 
 function aaPlanVsActualTableHTML(dailyRows) {
@@ -3284,7 +3375,155 @@ function renderAdsAnalysis() {
   const dailyRows = groupAdsDailyByDay(rows)
   renderAaTrendChart(dailyRows)
   document.getElementById('aa_dailyTable').innerHTML = aaDailyTableHTML(dailyRows)
+  document.getElementById('aa_summaryBottomCards').innerHTML = aaSummaryBottomCardsHTML(dailyRows)
+  renderAaSummaryChart(dailyRows)
+  document.getElementById('aa_weeklyAlloc').innerHTML = aaWeeklyAllocTableHTML(dailyRows)
   document.getElementById('aa_planVsActual').innerHTML = aaPlanVsActualTableHTML(dailyRows)
+}
+
+/** Khoi Tom tat nhanh (dat NGAY DUOI bang so sanh hieu qua ads giua cac ngay) -
+ * gom cac chi so tong/trung binh ca ky + 1 bieu do duong Chi phi/Doanh so/ROAS
+ * (tuong tu Dashboard Shopee: KPI cards + 1 chart xu huong ben duoi). */
+function aaSummaryBottomCardsHTML(dailyRows) {
+  if (!dailyRows.length) return ''
+  const n = dailyRows.length
+  const sum = (k) => dailyRows.reduce((s, d) => s + (Number(d[k]) || 0), 0)
+  const totalImpr = sum('impressions'), totalClicks = sum('clicks'), totalCost = sum('cost'), totalRevenue = sum('revenue'), totalOrders = sum('orders')
+  const totalRoas = totalCost > 0 ? totalRevenue / totalCost : 0
+  const avgCtr = totalImpr > 0 ? (totalClicks / totalImpr) * 100 : 0
+  const avgCpc = totalClicks > 0 ? totalCost / totalClicks : 0
+  const cards = [
+    { label: `Tổng Chi phí (${n} ngày)`, value: formatVND(totalCost) },
+    { label: 'Tổng Doanh số', value: formatVND(totalRevenue) },
+    { label: 'ROAS trung bình', value: totalRoas.toFixed(2) + 'x', color: 'text-green-600' },
+    { label: 'Tổng Đơn hàng', value: formatNumber(totalOrders) },
+    { label: 'CTR trung bình', value: formatPercent(avgCtr) },
+    { label: 'CPC trung bình', value: formatVND(avgCpc) }
+  ]
+  return `<div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">${cards.map((c) => `
+    <div class="rounded-lg border p-3 border-gray-200 dark:border-gray-800">
+      <p class="text-xs text-gray-400">${c.label}</p>
+      <p class="mt-1 text-base font-bold ${c.color || ''}">${c.value}</p>
+    </div>`).join('')}</div>`
+}
+
+function renderAaSummaryChart(dailyRows) {
+  const labels = dailyRows.map((d) => { const [, m, dd] = d.date.split('-'); return `${dd}/${m}` })
+  if (aaCharts.summary) { aaCharts.summary.destroy(); delete aaCharts.summary }
+  const canvas = document.getElementById('aa_chartSummary')
+  if (!canvas) return
+  aaCharts.summary = new Chart(canvas, {
+    data: { labels, datasets: [
+      { type: 'bar', label: 'Chi phí', data: dailyRows.map((d) => d.cost), backgroundColor: 'rgba(59,130,246,0.7)', yAxisID: 'y' },
+      { type: 'bar', label: 'Doanh số', data: dailyRows.map((d) => d.revenue), backgroundColor: 'rgba(238,77,45,0.7)', yAxisID: 'y' },
+      { type: 'line', label: 'ROAS (x)', data: dailyRows.map((d) => d.roas), borderColor: '#10B981', backgroundColor: '#10B981', tension: 0.3, yAxisID: 'y1' }
+    ] },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { position: 'bottom' },
+        datalabels: {
+          display: (ctx) => ctx.dataset.type === 'line',
+          align: 'top', anchor: 'end', font: { size: 9 }, color: '#10B981',
+          formatter: (v) => (Number(v) || 0).toFixed(1)
+        }
+      },
+      scales: {
+        y: { position: 'left', title: { display: true, text: 'đ' } },
+        y1: { position: 'right', title: { display: true, text: 'ROAS (x)' }, grid: { drawOnChartArea: false } }
+      }
+    }
+  })
+}
+
+/** Bang Phan bo ngan sach theo TUAN: Ke hoach (tu planResult da luu) vs Thuc te
+ * (tong hop tu dailyRows theo tuan). KHONG co cot "ngan sach live/chi phi live"
+ * theo dung yeu cau - day la bang KE HOACH, dung de xem Thuc te dat bao nhieu %
+ * so voi Ke hoach cho tung tuan trong thang. */
+function aaWeeklyAllocTableHTML(dailyRows) {
+  if (!aaState.planResult) {
+    return `<p class="text-sm text-gray-400">Chưa có Kế hoạch tháng nào được lưu cho Shop "${escapeHtml(aaState.shopName)}" — Tháng ${pad2(aaState.thang)}/${aaState.nam} để lập bảng phân bổ theo tuần. Hãy Upload Kế hoạch tháng tương ứng ở mục "📅 Kế hoạch tháng".</p>`
+  }
+  const planRows = aaState.planResult.rows
+  if (!planRows || !planRows.length) return '<p class="text-sm text-gray-400">Kế hoạch tháng chưa có dữ liệu ngày.</p>'
+
+  const weekKeyOf = (dateStr) => toISODate(startOfWeekMonday(new Date(dateStr + 'T00:00:00')))
+  const actualByDate = {}
+  dailyRows.forEach((d) => { actualByDate[d.date] = d })
+
+  const weeks = new Map() // weekKey -> { planCost, planRevenue, days, actualCost, actualRevenue, actualDays }
+  planRows.forEach((r) => {
+    const wk = weekKeyOf(r.date)
+    if (!weeks.has(wk)) weeks.set(wk, { planCost: 0, planRevenue: 0, planDays: 0, actualCost: 0, actualRevenue: 0, actualDays: 0 })
+    const w = weeks.get(wk)
+    w.planCost += r.totalBudget || 0
+    w.planRevenue += r.totalGMV || 0
+    w.planDays += 1
+    const actual = actualByDate[r.date]
+    if (actual) { w.actualCost += actual.cost; w.actualRevenue += actual.revenue; w.actualDays += 1 }
+  })
+
+  const totalPlanCost = planRows.reduce((s, r) => s + (r.totalBudget || 0), 0)
+  const weekKeys = Array.from(weeks.keys()).sort()
+
+  const rowsHtml = weekKeys.map((wk, i) => {
+    const w = weeks.get(wk)
+    const pctBudget = totalPlanCost > 0 ? (w.planCost / totalPlanCost) * 100 : 0
+    const planCostPerDay = w.planDays > 0 ? w.planCost / w.planDays : 0
+    const planRevPerDay = w.planDays > 0 ? w.planRevenue / w.planDays : 0
+    const pctAchievedCost = w.planCost > 0 ? (w.actualCost / w.planCost) * 100 : null
+    const pctAchievedRevenue = w.planRevenue > 0 ? (w.actualRevenue / w.planRevenue) * 100 : null
+    const badge = (pct) => {
+      if (pct === null) return '<span class="text-gray-400">—</span>'
+      const cls = pct >= 95 ? 'text-green-600' : pct >= 70 ? 'text-amber-600' : 'text-red-500'
+      return `<span class="${cls} font-semibold">${pct.toFixed(0)}%</span>`
+    }
+    return `<tr class="border-b border-gray-200 dark:border-gray-800 last:border-0">
+      <td class="py-1.5 pr-3 whitespace-nowrap font-medium">Tuần ${i + 1}</td>
+      <td class="py-1.5 pr-3 whitespace-nowrap">${formatPercent(pctBudget)}</td>
+      <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(w.planCost)}</td>
+      <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(planCostPerDay)}</td>
+      <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(w.planRevenue)}</td>
+      <td class="py-1.5 pr-3 whitespace-nowrap">${formatVND(planRevPerDay)}</td>
+      <td class="py-1.5 pr-3 whitespace-nowrap">${w.actualDays > 0 ? formatVND(w.actualCost) : '<span class="text-gray-400">Chưa có dữ liệu</span>'}</td>
+      <td class="py-1.5 pr-3 whitespace-nowrap">${w.actualDays > 0 ? formatVND(w.actualRevenue) : ''}</td>
+      <td class="py-1.5 pr-3 whitespace-nowrap">${badge(pctAchievedCost)}</td>
+      <td class="py-1.5 pr-3 whitespace-nowrap">${badge(pctAchievedRevenue)}</td>
+    </tr>`
+  }).join('')
+
+  const totalActualCost = weekKeys.reduce((s, wk) => s + weeks.get(wk).actualCost, 0)
+  const totalActualRevenue = weekKeys.reduce((s, wk) => s + weeks.get(wk).actualRevenue, 0)
+  const totalPlanRevenue = weekKeys.reduce((s, wk) => s + weeks.get(wk).planRevenue, 0)
+
+  return `<table class="w-full text-left text-sm">
+    <thead><tr class="border-b border-gray-200 dark:border-gray-800">
+      <th class="py-2 pr-3 font-medium text-gray-400">Tuần</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">% Ngân sách KH</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Chi phí KH (tuần)</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Chi phí KH/ngày</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Doanh số KH (tuần)</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Doanh số KH/ngày</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Chi phí Thực tế</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">Doanh số Thực tế</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">% Đạt Chi phí</th>
+      <th class="py-2 pr-3 font-medium text-gray-400">% Đạt Doanh số</th>
+    </tr></thead>
+    <tbody>${rowsHtml}</tbody>
+    <tfoot><tr class="border-t-2 border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800/60 font-semibold">
+      <td class="py-2 pr-3">TOTAL</td>
+      <td class="py-2 pr-3">100%</td>
+      <td class="py-2 pr-3">${formatVND(totalPlanCost)}</td>
+      <td class="py-2 pr-3">—</td>
+      <td class="py-2 pr-3">${formatVND(totalPlanRevenue)}</td>
+      <td class="py-2 pr-3">—</td>
+      <td class="py-2 pr-3">${formatVND(totalActualCost)}</td>
+      <td class="py-2 pr-3">${formatVND(totalActualRevenue)}</td>
+      <td class="py-2 pr-3">${totalPlanCost > 0 ? (totalActualCost / totalPlanCost * 100).toFixed(0) + '%' : '—'}</td>
+      <td class="py-2 pr-3">${totalPlanRevenue > 0 ? (totalActualRevenue / totalPlanRevenue * 100).toFixed(0) + '%' : '—'}</td>
+    </tr></tfoot>
+  </table>
+  <p class="mt-2 text-[11px] text-gray-400">Tuần tính theo lịch (Thứ 2 → Chủ nhật). "% Đạt" ≥95% = Xanh (đạt mục tiêu), 70–95% = Vàng (gần đạt), &lt;70% = Đỏ (chưa đạt).</p>`
 }
 
 /* -----------------------------------------------------------------------
